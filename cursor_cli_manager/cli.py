@@ -10,10 +10,15 @@ from typing import Any, Dict, List, Optional, Tuple
 import curses
 
 from cursor_cli_manager.agent_discovery import discover_agent_chats, discover_agent_workspaces
-from cursor_cli_manager.agent_paths import ENV_CURSOR_AGENT_CONFIG_DIR, CursorAgentDirs, get_cursor_agent_dirs
+from cursor_cli_manager.agent_paths import (
+    ENV_CURSOR_AGENT_CONFIG_DIR,
+    CursorAgentDirs,
+    get_cursor_agent_dirs,
+    workspace_hash_candidates,
+)
 from cursor_cli_manager.agent_store import extract_recent_messages, format_messages_preview
 from cursor_cli_manager.models import AgentChat, AgentWorkspace
-from cursor_cli_manager.opening import build_resume_command, exec_resume_chat, resolve_cursor_agent_path
+from cursor_cli_manager.opening import build_resume_command, exec_new_chat, exec_resume_chat, resolve_cursor_agent_path
 from cursor_cli_manager.agent_workspace_map import (
     learn_workspace_path,
     load_workspace_map,
@@ -106,8 +111,8 @@ def cmd_open(agent_dirs: CursorAgentDirs, chat_id: str, *, workspace_path: Optio
 def _run_tui(
     agent_dirs: CursorAgentDirs,
     workspaces: List[AgentWorkspace],
-) -> Optional[Tuple[AgentWorkspace, AgentChat]]:
-    def _inner(stdscr: "curses.window") -> Optional[Tuple[AgentWorkspace, AgentChat]]:
+) -> Optional[Tuple[AgentWorkspace, Optional[AgentChat]]]:
+    def _inner(stdscr: "curses.window") -> Optional[Tuple[AgentWorkspace, Optional[AgentChat]]]:
         return select_chat(
             stdscr,
             workspaces=workspaces,
@@ -125,12 +130,46 @@ def _run_tui(
     return curses.wrapper(_inner)
 
 
+def _pin_cwd_workspace(agent_dirs: CursorAgentDirs, workspaces: List[AgentWorkspace]) -> List[AgentWorkspace]:
+    """
+    Ensure the current working directory is always the first workspace in the TUI,
+    even if it has no chats yet.
+    """
+    try:
+        cwd = Path.cwd()
+    except Exception:
+        return workspaces
+
+    candidates = list(workspace_hash_candidates(cwd))
+    chosen_hash: Optional[str] = None
+    existing = {w.cwd_hash: w for w in workspaces}
+    for h in candidates:
+        if h in existing:
+            chosen_hash = h
+            break
+    if chosen_hash is None:
+        chosen_hash = candidates[0] if candidates else ""
+
+    if not chosen_hash:
+        return workspaces
+
+    cwd_ws = AgentWorkspace(
+        cwd_hash=chosen_hash,
+        workspace_path=cwd,
+        chats_root=agent_dirs.chats_dir / chosen_hash,
+    )
+    rest = [w for w in workspaces if w.cwd_hash != chosen_hash]
+    return [cwd_ws] + rest
+
+
 def cmd_tui(agent_dirs: CursorAgentDirs) -> int:
     # Hide chats whose original workspace folder no longer exists.
-    workspaces = discover_agent_workspaces(agent_dirs, exclude_missing_paths=True)
+    workspaces = _pin_cwd_workspace(
+        agent_dirs,
+        discover_agent_workspaces(agent_dirs, exclude_missing_paths=True),
+    )
     if not workspaces:
-        print("No cursor-agent chats found.")
-        print("Tip: run cursor-agent inside a folder to create chats, then re-run this manager.")
+        print("No workspaces available.")
         return 1
 
     selection = _run_tui(agent_dirs, workspaces)
@@ -141,6 +180,9 @@ def cmd_tui(agent_dirs: CursorAgentDirs) -> int:
         print("Error: selected workspace has unknown path; cannot safely resume.")
         print("Tip: run the manager from that folder so the workspace can be identified.")
         return 1
+    if chat is None:
+        exec_new_chat(workspace_path=ws.workspace_path)
+        return 0  # unreachable
     exec_resume_chat(chat.chat_id, workspace_path=ws.workspace_path)
     return 0  # unreachable
 

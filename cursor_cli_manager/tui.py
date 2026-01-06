@@ -19,6 +19,19 @@ class Theme:
     unfocused_selected_attr: int
 
 
+@dataclass(frozen=True)
+class NewAgentItem:
+    """
+    Synthetic list row that represents starting a brand-new cursor-agent session
+    in the selected workspace.
+    """
+
+    always_visible: bool = True
+
+
+NEW_AGENT_ITEM = NewAgentItem()
+
+
 def _init_theme() -> Theme:
     # Fallback theme (no color support).
     focused = curses.A_REVERSE | curses.A_BOLD
@@ -223,6 +236,9 @@ def _filter_items(items: List[Tuple[str, object]], needle: str) -> List[Tuple[st
     n = needle.lower()
     out: List[Tuple[str, object]] = []
     for label, obj in items:
+        if getattr(obj, "always_visible", False):
+            out.append((label, obj))
+            continue
         if n in label.lower():
             out.append((label, obj))
     return out
@@ -336,7 +352,7 @@ def select_chat(
     workspaces: List[AgentWorkspace],
     load_chats: Callable[[AgentWorkspace], List[AgentChat]],
     load_preview: Callable[[AgentChat], Tuple[Optional[str], Optional[str]]],
-) -> Optional[Tuple[AgentWorkspace, AgentChat]]:
+) -> Optional[Tuple[AgentWorkspace, Optional[AgentChat]]]:
     curses.curs_set(0)
     stdscr.keypad(True)
     curses.mousemask(curses.ALL_MOUSE_EVENTS)
@@ -401,6 +417,7 @@ def select_chat(
         ws = current_workspace()
         chats: List[AgentChat] = get_chats(ws) if ws else []
         chat_items: List[Tuple[str, object]] = []
+        chat_items.append(("(New Agent)", NEW_AGENT_ITEM))
         for c in chats:
             ts = format_epoch_ms(c.created_at_ms)
             label = f"{c.name}  ({ts})"
@@ -444,15 +461,26 @@ def select_chat(
             )
 
         selected_chat: Optional[AgentChat] = None
+        selected_is_new_agent = False
         if chat_items:
             filtered = _filter_items(chat_items, chat_filter)
             if filtered:
                 chat_state.clamp(len(filtered))
-                selected_chat = filtered[chat_state.selected][1]  # type: ignore[assignment]
+                obj = filtered[chat_state.selected][1]
+                if isinstance(obj, AgentChat):
+                    selected_chat = obj
+                else:
+                    selected_is_new_agent = True
 
         msg = None
         if ws:
             msg = chat_error.get(ws.cwd_hash)
+
+        if ws and selected_is_new_agent and not msg:
+            if ws.workspace_path:
+                msg = f"Start a new Cursor Agent chat in:\n{ws.workspace_path}"
+            else:
+                msg = "Workspace path is unknown. Run ccm from that folder to learn it."
 
         if ws and selected_chat and not msg:
             role, text = (None, None)
@@ -495,7 +523,7 @@ def select_chat(
 
         _render_preview(stdscr, layout.preview, ws, selected_chat, msg)
 
-        status = "Tab/Left/Right: switch  /: search  Enter: resume  q: quit"
+        status = "Tab/Left/Right: switch  /: search  Enter: open  q: quit"
         if input_mode:
             status = "Type to search. Enter: apply  Esc: cancel"
         _status_bar(stdscr, max_y, max_x, status)
@@ -601,7 +629,9 @@ def select_chat(
                             continue
                         chat_state.clamp(len(filtered))
                         selected = filtered[chat_state.selected][1]
-                        return ws, selected  # type: ignore[return-value]
+                        if isinstance(selected, AgentChat):
+                            return ws, selected
+                        return ws, None
 
                     if is_click:
                         last_click_at = now
@@ -641,7 +671,9 @@ def select_chat(
                         continue
                     chat_state.clamp(len(filtered))
                     selected = filtered[chat_state.selected][1]
-                    return ws, selected  # type: ignore[return-value]
+                    if isinstance(selected, AgentChat):
+                        return ws, selected
+                    return ws, None
                 if is_click:
                     last_click_at = now
                     last_click_target = ("chats", chat_state.selected)
@@ -708,6 +740,8 @@ def select_chat(
                 continue
             chat_state.clamp(len(filtered))
             selected = filtered[chat_state.selected][1]
-            return ws, selected  # type: ignore[return-value]
+            if isinstance(selected, AgentChat):
+                return ws, selected
+            return ws, None
 
 

@@ -28,17 +28,14 @@ After installing, you will get two command names:
 - `ccm`
 - `cursor-cli-manager`
 
-### From Git
+### From Git (recommended)
 
 ```bash
-# HTTPS (may require GitLab auth/token for private repos)
-pip install "cursor-cli-manager @ git+https://gitlab-master.nvidia.com/jawei/cursor_cli_manager.git@main"
-
 # SSH (recommended if you have SSH access configured)
 pip install "cursor-cli-manager @ git+ssh://git@gitlab-master.nvidia.com:12051/jawei/cursor_cli_manager.git@main"
 
 # or pin to a commit:
-pip install "cursor-cli-manager @ git+https://gitlab-master.nvidia.com/jawei/cursor_cli_manager.git@<commit_sha>"
+pip install "cursor-cli-manager @ git+ssh://git@gitlab-master.nvidia.com:12051/jawei/cursor_cli_manager.git@<commit_sha>"
 ```
 
 ## Run
@@ -62,7 +59,8 @@ cursor-cli-manager
 - **Navigation**: Up/Down, PageUp/PageDown
 - **Switch pane**: Tab / Left / Right
 - **Search**: `/` then type, Enter apply, Esc cancel
-- **Resume chat**: Enter, or double-click a chat with the mouse
+- **Open**: Enter, or double-click a row with the mouse
+  - Select **`(New Agent)`** at the top of a workspace to start a brand-new terminal chat in that folder
 - **Quit**: `q`
 - **Mouse**: click to select (scroll wheel support is best-effort and may be unavailable on some macOS `curses` builds)
 
