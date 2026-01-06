@@ -5,7 +5,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from cursor_cli_manager.agent_store import extract_last_message_preview, extract_recent_messages, read_chat_meta
+from cursor_cli_manager.agent_store import (
+    extract_last_message_preview,
+    extract_recent_messages,
+    read_chat_meta,
+    read_chat_meta_and_preview,
+)
 
 
 def _make_store_db(db_path: Path, *, meta_obj: dict, blob_id: str, blob_data: bytes) -> None:
@@ -48,6 +53,12 @@ class TestAgentStore(unittest.TestCase):
             role, text = extract_last_message_preview(db, root)
             self.assertEqual(role, "user")
             self.assertEqual(text, "hello")
+
+            meta2, role2, text2 = read_chat_meta_and_preview(db)
+            assert meta2 is not None
+            self.assertEqual(meta2.agent_id, "chat-1")
+            self.assertEqual(role2, "user")
+            self.assertEqual(text2, "hello")
 
     def test_preview_fallback_scans_other_blobs(self) -> None:
         with tempfile.TemporaryDirectory() as td:

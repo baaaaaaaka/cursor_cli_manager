@@ -1,6 +1,6 @@
 import unittest
 
-from cursor_cli_manager.formatting import display_width, truncate_to_width, wrap_text
+from cursor_cli_manager.formatting import center_to_width, display_width, pad_to_width, truncate_to_width, wrap_text
 
 
 class TestFormatting(unittest.TestCase):
@@ -20,6 +20,21 @@ class TestFormatting(unittest.TestCase):
     def test_truncate_to_width(self) -> None:
         self.assertEqual(truncate_to_width("hello", 5), "hello")
         self.assertEqual(truncate_to_width("hello", 4), "hel…")
+
+    def test_pad_to_width_ascii(self) -> None:
+        self.assertEqual(pad_to_width("abc", 5), "abc  ")
+        self.assertEqual(display_width(pad_to_width("abc", 5)), 5)
+
+    def test_pad_to_width_cjk(self) -> None:
+        # "你" is width 2.
+        s = pad_to_width("你", 4)
+        self.assertEqual(display_width(s), 4)
+        self.assertTrue(s.startswith("你"))
+
+    def test_center_to_width(self) -> None:
+        s = center_to_width("hi", 6)
+        self.assertEqual(display_width(s), 6)
+        self.assertIn("hi", s)
 
     def test_wrap_text(self) -> None:
         lines = wrap_text("hello world", 5)

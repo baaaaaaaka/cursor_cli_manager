@@ -48,6 +48,48 @@ def truncate_to_width(s: str, max_width: int, *, ellipsis: str = "…") -> str:
     return "".join(out) + ellipsis
 
 
+def pad_to_width(s: str, width: int, *, pad_char: str = " ") -> str:
+    """
+    Pad/truncate a string to exactly `width` terminal columns (best-effort).
+
+    This uses `display_width` so CJK wide characters and combining marks don't
+    cause visual misalignment in monospace terminals.
+    """
+    if width <= 0:
+        return ""
+    if not pad_char:
+        pad_char = " "
+
+    # Ensure we don't exceed width.
+    if display_width(s) > width:
+        s = truncate_to_width(s, width)
+
+    w = display_width(s)
+    if w >= width:
+        return s
+    return s + (pad_char * (width - w))
+
+
+def center_to_width(s: str, width: int, *, pad_char: str = " ") -> str:
+    """
+    Center a string within `width` terminal columns (best-effort).
+    """
+    if width <= 0:
+        return ""
+    if not pad_char:
+        pad_char = " "
+
+    if display_width(s) > width:
+        s = truncate_to_width(s, width)
+
+    w = display_width(s)
+    if w >= width:
+        return s
+    left = (width - w) // 2
+    right = (width - w) - left
+    return (pad_char * left) + s + (pad_char * right)
+
+
 def wrap_text(s: str, width: int) -> List[str]:
     """
     Wrap text by display width (best-effort). Preserves existing newlines.

@@ -7,8 +7,9 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from urllib.parse import unquote, urlparse
 
 from cursor_cli_manager.agent_paths import CursorAgentDirs, get_cursor_agent_dirs, is_md5_hex, workspace_hash_candidates
+from cursor_cli_manager.agent_title_cache import get_cached_title, is_generic_chat_name, load_chat_title_cache
 from cursor_cli_manager.agent_workspace_map import load_workspace_map
-from cursor_cli_manager.agent_store import extract_last_message_preview, read_chat_meta
+from cursor_cli_manager.agent_store import extract_last_message_preview, read_chat_meta, read_chat_meta_and_preview
 from cursor_cli_manager.models import AgentChat, AgentWorkspace
 from cursor_cli_manager.paths import CursorUserDirs, get_cursor_user_dirs
 from cursor_cli_manager.vscdb import read_json
@@ -165,25 +166,43 @@ def discover_agent_chats(workspace: AgentWorkspace, *, with_preview: bool = Fals
     if not root.exists():
         return []
 
+    # Best-effort: load derived title cache once per workspace.
+    title_cache = None
+    try:
+        config_dir = root.parent.parent
+        title_cache = load_chat_title_cache(config_dir)
+    except Exception:
+        title_cache = None
+
     out: List[AgentChat] = []
     for d in root.iterdir():
         if not d.is_dir():
             continue
         store_db = d / "store.db"
-        meta = read_chat_meta(store_db)
+        role: Optional[str] = None
+        text: Optional[str] = None
+        if with_preview:
+            meta, role, text = read_chat_meta_and_preview(store_db)
+        else:
+            meta = read_chat_meta(store_db)
         if meta is None:
             continue
 
+        name = meta.name
+        if title_cache is not None and is_generic_chat_name(name):
+            cached = get_cached_title(title_cache, cwd_hash=workspace.cwd_hash, chat_id=meta.agent_id)
+            if cached:
+                name = cached
+
         chat = AgentChat(
             chat_id=meta.agent_id,
-            name=meta.name,
+            name=name,
             created_at_ms=meta.created_at_ms,
             mode=meta.mode,
             latest_root_blob_id=meta.latest_root_blob_id,
             store_db_path=store_db,
         )
         if with_preview and meta.latest_root_blob_id:
-            role, text = extract_last_message_preview(store_db, meta.latest_root_blob_id)
             chat = AgentChat(
                 **{**chat.__dict__, "last_role": role, "last_text": text}  # type: ignore[arg-type]
             )
