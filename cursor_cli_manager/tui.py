@@ -25,6 +25,7 @@ from cursor_cli_manager.formatting import (
     wrap_text,
 )
 from cursor_cli_manager.models import AgentChat, AgentWorkspace
+from cursor_cli_manager.update import UpdateStatus, check_for_update
 
 
 @dataclass(frozen=True)
@@ -544,6 +545,14 @@ class PreviewState:
 
     def page(self, delta_pages: int, n_lines: int, view_h: int) -> None:
         self.move(delta_pages * max(1, view_h), n_lines, view_h)
+
+
+class UpdateRequested(Exception):
+    """
+    Raised from inside the TUI when the user triggers an in-app upgrade.
+
+    `curses.wrapper()` will restore terminal state before propagating the exception.
+    """
 
 
 def _safe_addstr(win: "curses.window", y: int, x: int, s: str, attr: int = 0) -> None:
@@ -1127,6 +1136,37 @@ def select_chat(
 
     bg = _BackgroundLoader(load_chats=load_chats, load_preview_snippet=load_preview_snippet, load_preview_full=load_preview_full)
 
+    # Best-effort auto-update check (non-blocking).
+    update_q: "queue.Queue[UpdateStatus]" = queue.Queue()
+    update_status: Optional[UpdateStatus] = None
+    update_checked_at = 0.0
+    update_checking = False
+
+    def _start_update_check(*, force: bool = False) -> None:
+        nonlocal update_checking, update_checked_at
+        now = time.monotonic()
+        # Check at most every 5 minutes (or on explicit force).
+        if (not force) and update_checked_at and (now - update_checked_at) < 300:
+            return
+        if update_checking:
+            return
+        update_checking = True
+        update_checked_at = now
+
+        def _run() -> None:
+            nonlocal update_checking
+            try:
+                st = check_for_update()
+                update_q.put(st)
+            except Exception:
+                pass
+            finally:
+                update_checking = False
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    _start_update_check(force=True)
+
     chat_cache: Dict[str, List[AgentChat]] = {}
     chat_error: Dict[str, str] = {}
     chat_loading: Set[str] = set()
@@ -1192,6 +1232,14 @@ def select_chat(
     while True:
         now = time.monotonic()
         spin = _spinner(now)
+
+        # Apply update status results.
+        try:
+            while True:
+                update_status = update_q.get_nowait()
+        except queue.Empty:
+            pass
+        _start_update_check(force=False)
 
         # Apply background results.
         for item in bg.drain():
@@ -1404,6 +1452,10 @@ def select_chat(
         elif focus == "preview":
             status = "↑/↓ PgUp/PgDn: scroll preview  Tab/Left/Right: switch  q: quit"
 
+        # Non-intrusive update hint (if we can safely determine it).
+        if update_status and update_status.supported and update_status.update_available:
+            status = f"{status}  |  Update available; Ctrl+U to upgrade"
+
         # Preview scroll state: reset on content changes, clamp every frame.
         # Cache wrapped preview lines so scrolling doesn't re-wrap on every keypress.
         preview_key = ("msg" if msg else "chat", (ws.cwd_hash if ws else None), (selected_chat.chat_id if selected_chat else None))
@@ -1557,6 +1609,12 @@ def select_chat(
 
         if ch in (ord("q"), ord("Q")):
             return None
+
+        # Ctrl+U: upgrade (when we can safely fast-forward)
+        if ch == 21:  # ^U
+            if update_status and update_status.supported and update_status.update_available:
+                raise UpdateRequested()
+            continue
 
         if ch in (9,):  # Tab
             if focus == "workspaces":

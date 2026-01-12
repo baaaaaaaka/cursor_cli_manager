@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import asdict
 from pathlib import Path
@@ -26,7 +27,8 @@ from cursor_cli_manager.agent_workspace_map import (
     try_learn_current_cwd,
     workspace_map_path,
 )
-from cursor_cli_manager.tui import probe_synchronized_output_support, select_chat
+from cursor_cli_manager.tui import UpdateRequested, probe_synchronized_output_support, select_chat
+from cursor_cli_manager.update import perform_update
 
 
 def _workspace_to_json(ws: AgentWorkspace) -> Dict[str, Any]:
@@ -196,7 +198,24 @@ def cmd_tui(agent_dirs: CursorAgentDirs) -> int:
         print("No workspaces available.")
         return 1
 
-    selection = _run_tui(agent_dirs, workspaces)
+    while True:
+        try:
+            selection = _run_tui(agent_dirs, workspaces)
+        except UpdateRequested:
+            ok, out = perform_update(python=sys.executable)
+            if out:
+                print(out)
+            if ok:
+                # Restart the current command so the updated code is loaded.
+                argv = sys.argv[:] or ["ccm"]
+                try:
+                    os.execvp(argv[0], argv)
+                except Exception:
+                    # Fallback: run via python -m for editable/dev installs.
+                    os.execv(sys.executable, [sys.executable, "-m", "cursor_cli_manager"] + argv[1:])
+            # Pull failed; return to TUI.
+            continue
+
     if not selection:
         return 0
     ws, chat = selection
