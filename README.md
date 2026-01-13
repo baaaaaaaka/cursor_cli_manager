@@ -31,11 +31,11 @@ After installing, you will get two command names:
 ### From Git (recommended)
 
 ```bash
-# SSH (recommended if you have SSH access configured)
-pip install "cursor-cli-manager @ git+ssh://git@gitlab-master.nvidia.com:12051/jawei/cursor_cli_manager.git@main"
+# HTTPS (recommended)
+pip install "cursor-cli-manager @ git+https://github.com/baaaaaaaka/cursor_cli_manager@main"
 
 # or pin to a commit:
-pip install "cursor-cli-manager @ git+ssh://git@gitlab-master.nvidia.com:12051/jawei/cursor_cli_manager.git@<commit_sha>"
+pip install "cursor-cli-manager @ git+https://github.com/baaaaaaaka/cursor_cli_manager.git@<commit_sha>"
 ```
 
 ## Run

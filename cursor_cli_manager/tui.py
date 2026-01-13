@@ -26,6 +26,7 @@ from cursor_cli_manager.formatting import (
 )
 from cursor_cli_manager.models import AgentChat, AgentWorkspace
 from cursor_cli_manager.update import UpdateStatus, check_for_update
+from cursor_cli_manager import __version__
 
 
 @dataclass(frozen=True)
@@ -1042,15 +1043,31 @@ class _StatusBar:
     ) -> None:
         self.win: "curses.window" = stdscr.derwin(1, max_x, max_y - 1, 0)
         self.win.leaveok(True)
-        self._cache: Optional[str] = None
+        self._cache: Optional[Tuple[str, str, int]] = None  # (left_bar, right_text, right_attr)
         self._w = max_x
 
-    def draw(self, text: str, *, force: bool = False) -> None:
-        bar = pad_to_width(truncate_to_width(text, self._w), self._w)
-        if not force and self._cache == bar:
+    def draw(self, text: str, *, right: str = "", right_attr: int = 0, force: bool = False) -> None:
+        """
+        Draw a full-width status bar, with an optional right-aligned segment.
+
+        The entire bar is reverse video; the right segment can additionally set
+        attributes (e.g. bold).
+        """
+        left_bar = pad_to_width(truncate_to_width(text, self._w), self._w)
+        right_s = truncate_to_width(right or "", self._w)
+        cache_key = (left_bar, right_s, int(right_attr or 0))
+        if not force and self._cache == cache_key:
             return
-        self._cache = bar
-        _safe_addstr(self.win, 0, 0, bar, curses.A_REVERSE)
+        self._cache = cache_key
+
+        # Base bar (always full width, so it clears any previous right segment).
+        _safe_addstr(self.win, 0, 0, left_bar, curses.A_REVERSE)
+
+        # Right segment overlay (right-aligned).
+        if right_s:
+            rw = display_width(right_s)
+            x = max(0, self._w - rw)
+            _safe_addstr(self.win, 0, x, right_s, curses.A_REVERSE | right_attr)
         try:
             self.win.noutrefresh()
         except curses.error:
@@ -1451,10 +1468,18 @@ def select_chat(
             status = "Type to search. Enter: apply  Esc: cancel"
         elif focus == "preview":
             status = "↑/↓ PgUp/PgDn: scroll preview  Tab/Left/Right: switch  q: quit"
-
-        # Non-intrusive update hint (if we can safely determine it).
-        if update_status and update_status.supported and update_status.update_available:
-            status = f"{status}  |  Update available; Ctrl+U to upgrade"
+        # Right-bottom update info:
+        # - Up-to-date: show version + "latest"
+        # - Can't check: show version only
+        # - Update available: bold keybinding hint
+        update_right = f"v{__version__}"
+        update_right_attr = 0
+        if update_status and update_status.supported:
+            if update_status.update_available:
+                update_right = f"v{__version__}  Ctrl+U 更新"
+                update_right_attr = curses.A_BOLD
+            else:
+                update_right = f"v{__version__} 已是最新"
 
         # Preview scroll state: reset on content changes, clamp every frame.
         # Cache wrapped preview lines so scrolling doesn't re-wrap on every keypress.
@@ -1563,7 +1588,7 @@ def select_chat(
 
         if renderer.status is None:
             continue
-        renderer.status.draw(status, force=force_full)
+        renderer.status.draw(status, right=update_right, right_attr=update_right_attr, force=force_full)
 
         if sync_output:
             _sync_output_begin()
