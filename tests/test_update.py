@@ -23,10 +23,10 @@ class TestUpdatePep610(unittest.TestCase):
     def _make_pep610_layout(self, base: Path, *, direct_url: dict) -> Path:
         # Simulate site-packages layout:
         #   base/cursor_cli_manager/ (package_dir)
-        #   base/cursor_cli_manager-0.1.0.dist-info/direct_url.json
+        #   base/cursor_cli_manager-0.5.0.dist-info/direct_url.json
         pkg = base / "cursor_cli_manager"
         pkg.mkdir(parents=True, exist_ok=True)
-        dist = base / "cursor_cli_manager-0.1.0.dist-info"
+        dist = base / "cursor_cli_manager-0.5.0.dist-info"
         dist.mkdir(parents=True, exist_ok=True)
         (dist / "direct_url.json").write_text(json.dumps(direct_url), encoding="utf-8")
         return pkg

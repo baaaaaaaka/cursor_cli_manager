@@ -1067,7 +1067,16 @@ class _StatusBar:
         if right_s:
             rw = display_width(right_s)
             x = max(0, self._w - rw)
-            _safe_addstr(self.win, 0, x, right_s, curses.A_REVERSE | right_attr)
+            try:
+                self.win.addstr(0, x, right_s, curses.A_REVERSE | right_attr)
+            except curses.error:
+                # Fallback: if wide/unicode chars can't be drawn (locale/terminal),
+                # at least show an ASCII-only version.
+                safe = "".join(ch for ch in right_s if ord(ch) < 128)
+                if safe:
+                    rw2 = display_width(safe)
+                    x2 = max(0, self._w - rw2)
+                    _safe_addstr(self.win, 0, x2, safe, curses.A_REVERSE | right_attr)
         try:
             self.win.noutrefresh()
         except curses.error:
@@ -1476,10 +1485,10 @@ def select_chat(
         update_right_attr = 0
         if update_status and update_status.supported:
             if update_status.update_available:
-                update_right = f"v{__version__}  Ctrl+U 更新"
+                update_right = f"v{__version__}  Ctrl+U upgrade"
                 update_right_attr = curses.A_BOLD
             else:
-                update_right = f"v{__version__} 已是最新"
+                update_right = f"v{__version__} latest"
 
         # Preview scroll state: reset on content changes, clamp every frame.
         # Cache wrapped preview lines so scrolling doesn't re-wrap on every keypress.

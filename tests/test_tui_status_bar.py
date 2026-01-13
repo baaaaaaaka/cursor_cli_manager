@@ -44,15 +44,15 @@ class TestStatusBar(unittest.TestCase):
         stdscr = _FakeWindow(10, 40, name="stdscr")
         bar = _StatusBar(stdscr, max_y=10, max_x=40)
 
-        bar.draw("left", right="v0.1.0 已是最新", right_attr=0, force=True)
+        bar.draw("left", right="v0.5.0 latest", right_attr=0, force=True)
         ops = [op for op in bar.win.ops if op.kind == "addstr"]
         # Base bar at x=0.
         self.assertTrue(any(op.x == 0 and op.attr == curses.A_REVERSE for op in ops))
         # Right segment should be drawn near the right edge.
-        self.assertTrue(any((op.s or "").strip().startswith("v0.1.0") and op.attr == curses.A_REVERSE for op in ops))
+        self.assertTrue(any((op.s or "").strip().startswith("v0.5.0") and op.attr == curses.A_REVERSE for op in ops))
 
         bar.win.ops.clear()
-        bar.draw("left", right="Ctrl+U 更新", right_attr=curses.A_BOLD, force=True)
+        bar.draw("left", right="Ctrl+U upgrade", right_attr=curses.A_BOLD, force=True)
         ops = [op for op in bar.win.ops if op.kind == "addstr"]
         self.assertTrue(any((op.s or "").strip().startswith("Ctrl+U") and (op.attr or 0) & curses.A_BOLD for op in ops))
 
