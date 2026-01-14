@@ -21,9 +21,10 @@ class TestTuiInputHandling(unittest.TestCase):
             self.assertFalse(_should_quit(ch=key_exit, input_mode="ws"))
 
     def test_input_timeout_ms_polls_when_bg_or_update_pending(self) -> None:
-        self.assertEqual(_input_timeout_ms(bg_pending=False, update_checking=False), -1)
-        self.assertEqual(_input_timeout_ms(bg_pending=True, update_checking=False), 80)
-        self.assertEqual(_input_timeout_ms(bg_pending=False, update_checking=True), 80)
+        self.assertEqual(_input_timeout_ms(bg_pending=False, update_checking=False, ui_pending=False), -1)
+        self.assertEqual(_input_timeout_ms(bg_pending=True, update_checking=False, ui_pending=False), 80)
+        self.assertEqual(_input_timeout_ms(bg_pending=False, update_checking=True, ui_pending=False), 80)
+        self.assertEqual(_input_timeout_ms(bg_pending=False, update_checking=False, ui_pending=True), 80)
 
 
 if __name__ == "__main__":

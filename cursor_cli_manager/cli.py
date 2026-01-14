@@ -33,7 +33,15 @@ from cursor_cli_manager.agent_workspace_map import (
     try_learn_current_cwd,
     workspace_map_path,
 )
-from cursor_cli_manager.tui import UpdateRequested, probe_synchronized_output_support, select_chat
+from cursor_cli_manager.exporting import write_text_file
+from cursor_cli_manager.tui import (
+    ExportPendingExit,
+    UpdateRequested,
+    disable_xon_xoff_flow_control,
+    probe_synchronized_output_support,
+    restore_termios,
+    select_chat,
+)
 from cursor_cli_manager.update import perform_update
 
 
@@ -159,7 +167,11 @@ def _run_tui(
             sync_output=sync_output,
         )
 
-    return curses.wrapper(_inner)
+    flow_saved = disable_xon_xoff_flow_control()
+    try:
+        return curses.wrapper(_inner)
+    finally:
+        restore_termios(flow_saved)
 
 
 def _pin_cwd_workspace(agent_dirs: CursorAgentDirs, workspaces: List[AgentWorkspace]) -> List[AgentWorkspace]:
@@ -211,6 +223,21 @@ def cmd_tui(agent_dirs: CursorAgentDirs) -> int:
         try:
             selection = _run_tui(agent_dirs, workspaces)
             break
+        except ExportPendingExit as e:
+            # Finish saving after curses exits so the user sees progress in the normal terminal.
+            out_path = e.out_path
+            print(f"Saving {out_path} ...")
+            try:
+                text = format_messages_preview(
+                    extract_recent_messages(e.store_db_path, max_messages=None, max_blobs=None),
+                    max_chars_per_message=0,
+                )
+                write_text_file(out_path, text)
+                print(f"Saved {out_path}")
+                return 0
+            except Exception as ex:
+                print(f"Save failed: {ex}")
+                return 1
         except UpdateRequested:
             ok, out = perform_update(python=sys.executable)
             if out:

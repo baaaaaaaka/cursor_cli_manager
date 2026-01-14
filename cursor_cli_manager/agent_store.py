@@ -3,6 +3,8 @@ from __future__ import annotations
 import binascii
 import json
 import sqlite3
+import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
@@ -41,6 +43,7 @@ def _with_ro_connection(db_path: Path, op) -> Optional[object]:
         con: Optional[sqlite3.Connection] = None
         try:
             con = sqlite3.connect(uri, uri=True, timeout=0.2)
+            _tune_readonly_connection(con)
             return op(con)
         except sqlite3.Error as e:
             last_err = e
@@ -52,6 +55,34 @@ def _with_ro_connection(db_path: Path, op) -> Optional[object]:
             except Exception:
                 pass
     return None
+
+
+def _tune_readonly_connection(con: sqlite3.Connection) -> None:
+    """
+    Best-effort read-only tuning to reduce export latency.
+
+    These PRAGMAs are hints; failures are ignored to preserve portability.
+    """
+    # Make writes impossible even if a caller tries.
+    try:
+        con.execute("PRAGMA query_only=ON;")
+    except Exception:
+        pass
+    # Prefer keeping temporary state in memory.
+    try:
+        con.execute("PRAGMA temp_store=MEMORY;")
+    except Exception:
+        pass
+    # Increase page cache (negative = KB) to reduce IO churn on large blobs.
+    try:
+        con.execute("PRAGMA cache_size=-8000;")  # ~8 MiB
+    except Exception:
+        pass
+    # Memory-map file if possible (can significantly reduce memcpy on some systems).
+    try:
+        con.execute("PRAGMA mmap_size=268435456;")  # 256 MiB
+    except Exception:
+        pass
 
 
 def _maybe_decode_hex_json(s: str) -> Optional[Dict[str, Any]]:
@@ -210,6 +241,213 @@ def _iter_embedded_json_objects(data: bytes, *, max_objects: int = 200) -> Itera
             i = start + 1
 
 
+_ROLE_MARKER = b"\"role\""
+
+# Full-history extraction can be expensive on large store.db files. Cache the fully
+# extracted message list per DB+stamp so repeated preview/export is instant.
+_FULL_CACHE_LOCK = threading.Lock()
+# key: (db_path, roles_tuple, stamp) -> (messages, approx_bytes)
+_FULL_CACHE: "OrderedDict[Tuple[str, Tuple[str, ...], Tuple[int, int]], Tuple[List[Tuple[str, str]], int]]" = OrderedDict()
+_FULL_CACHE_BYTES = 0
+_FULL_CACHE_MAX_ENTRIES = 24
+_FULL_CACHE_MAX_BYTES = 32 * 1024 * 1024  # 32 MiB
+
+
+def _clear_caches_for_tests() -> None:
+    global _FULL_CACHE_BYTES
+    with _FULL_CACHE_LOCK:
+        _FULL_CACHE.clear()
+        _FULL_CACHE_BYTES = 0
+
+
+def _approx_messages_bytes(msgs: Sequence[Tuple[str, str]]) -> int:
+    # Rough accounting (Python object overhead ignored); sufficient for bounding cache growth.
+    total = 0
+    for r, t in msgs:
+        total += len(r) + len(t) + 32
+    return total
+
+
+def _blobs_stamp(con: sqlite3.Connection) -> Tuple[int, int]:
+    """
+    Compute a cheap, content-sensitive stamp for the blobs table.
+
+    We include both MAX(rowid) and SUM(LENGTH(data)) so that the stamp changes on
+    appends and most in-place updates, without reading all blob contents into Python.
+    """
+    try:
+        row = con.execute(
+            "SELECT COALESCE(MAX(rowid), 0), COALESCE(SUM(LENGTH(data)), 0) FROM blobs"
+        ).fetchone()
+    except sqlite3.Error:
+        return (0, 0)
+    if not row:
+        return (0, 0)
+    try:
+        return (int(row[0] or 0), int(row[1] or 0))
+    except Exception:
+        return (0, 0)
+
+
+def _full_cache_get(db_key: str, roles_key: Tuple[str, ...], stamp: Tuple[int, int]) -> Optional[List[Tuple[str, str]]]:
+    k = (db_key, roles_key, stamp)
+    with _FULL_CACHE_LOCK:
+        hit = _FULL_CACHE.get(k)
+        if hit is None:
+            return None
+        _FULL_CACHE.move_to_end(k, last=True)
+        return hit[0]
+
+
+def _full_cache_put(db_key: str, roles_key: Tuple[str, ...], stamp: Tuple[int, int], msgs: List[Tuple[str, str]]) -> None:
+    global _FULL_CACHE_BYTES
+    k = (db_key, roles_key, stamp)
+    b = _approx_messages_bytes(msgs)
+    with _FULL_CACHE_LOCK:
+        old = _FULL_CACHE.pop(k, None)
+        if old is not None:
+            _FULL_CACHE_BYTES -= int(old[1] or 0)
+        _FULL_CACHE[k] = (msgs, b)
+        _FULL_CACHE_BYTES += b
+        _FULL_CACHE.move_to_end(k, last=True)
+
+        while _FULL_CACHE and (len(_FULL_CACHE) > _FULL_CACHE_MAX_ENTRIES or _FULL_CACHE_BYTES > _FULL_CACHE_MAX_BYTES):
+            _k, (_msgs, _b) = _FULL_CACHE.popitem(last=False)
+            _FULL_CACHE_BYTES -= int(_b or 0)
+
+
+def _scan_balanced_object_end(data: bytes, start: int, *, max_len: int) -> Optional[int]:
+    """
+    Given `data[start] == b'{'`, find the matching '}' index using brace balancing.
+
+    Returns the inclusive end index, or None if not found within max_len.
+    """
+    n = len(data)
+    if start < 0 or start >= n or data[start] != 0x7B:  # '{'
+        return None
+    end_limit = min(n, start + max(0, max_len))
+
+    depth = 0
+    in_str = False
+    esc = False
+    j = start
+    while j < end_limit:
+        b = data[j]
+        if in_str:
+            if esc:
+                esc = False
+            elif b == 0x5C:  # backslash
+                esc = True
+            elif b == 0x22:  # quote
+                in_str = False
+        else:
+            if b == 0x22:  # quote
+                in_str = True
+            elif b == 0x7B:  # {
+                depth += 1
+            elif b == 0x7D:  # }
+                depth -= 1
+                if depth == 0:
+                    return j
+        j += 1
+    return None
+
+
+def _parse_json_dict_from_span(data: bytes, start: int, end_inclusive: int) -> Optional[Dict[str, Any]]:
+    if start < 0 or end_inclusive < start or end_inclusive >= len(data):
+        return None
+    try:
+        chunk = data[start : end_inclusive + 1]
+        obj = json.loads(chunk.decode("utf-8"))
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        return None
+
+
+def _find_enclosing_message_obj_around_role(
+    data: bytes,
+    role_pos: int,
+    *,
+    roles_set: set[str],
+    back_window: int = 65536,
+    max_candidates: int = 16,
+    max_obj_len: int = 262144,
+) -> Optional[Tuple[Dict[str, Any], int]]:
+    """
+    Try to find and parse the message object that contains a `\"role\"` marker at `role_pos`.
+
+    Returns (obj, end_pos_exclusive) if a plausible message dict is found.
+    """
+    n = len(data)
+    if role_pos < 0 or role_pos >= n:
+        return None
+
+    left = max(0, role_pos - max(0, back_window))
+    candidates: List[int] = []
+    p = role_pos
+    for _ in range(max(1, max_candidates)):
+        s = data.rfind(b"{", left, p + 1)
+        if s == -1:
+            break
+        candidates.append(s)
+        p = s - 1
+
+    for s in candidates:
+        end = _scan_balanced_object_end(data, s, max_len=max_obj_len)
+        if end is None:
+            continue
+        obj = _parse_json_dict_from_span(data, s, end)
+        if not isinstance(obj, dict):
+            continue
+        role = obj.get("role")
+        if not isinstance(role, str) or role not in roles_set:
+            continue
+        # Fast reject: messages must have a "content" field to be useful for us.
+        if "content" not in obj:
+            continue
+        return obj, end + 1
+    return None
+
+
+def _iter_message_objects_role_anchored(
+    data: bytes,
+    *,
+    roles: Sequence[str],
+    max_objects: int = 500,
+) -> Iterator[Dict[str, Any]]:
+    """
+    Faster iterator over message dicts by anchoring on `\"role\"` markers.
+
+    Compared to `_iter_embedded_json_objects`, this avoids parsing unrelated JSON
+    objects inside blobs once we know where a message-like object must exist.
+    """
+    if not data:
+        return
+    roles_set = {r for r in roles if isinstance(r, str)}
+    if not roles_set:
+        return
+    if b"{" not in data or _ROLE_MARKER not in data:
+        return
+
+    found = 0
+    pos = 0
+    n = len(data)
+    while pos < n and found < max_objects:
+        role_pos = data.find(_ROLE_MARKER, pos)
+        if role_pos == -1:
+            break
+        res = _find_enclosing_message_obj_around_role(data, role_pos, roles_set=roles_set)
+        if res is None:
+            pos = role_pos + len(_ROLE_MARKER)
+            continue
+        obj, end_pos = res
+        yield obj
+        found += 1
+        # Skip past the whole object to avoid re-parsing it if `\"role\"` also
+        # appears inside string content.
+        pos = max(end_pos, role_pos + len(_ROLE_MARKER))
+
+
 def _extract_text_from_message(msg: Dict[str, Any]) -> Optional[str]:
     content = msg.get("content")
     if isinstance(content, str) and content.strip():
@@ -301,7 +539,15 @@ def _extract_messages_from_connection(
         if b"{" not in blob or b"\"role\"" not in blob:
             continue
 
-        for obj in _iter_embedded_json_objects(blob, max_objects=500):
+        # Fast path: role-anchored extraction (falls back per-blob if needed).
+        #
+        # This is much faster on large store.db files where blobs contain many
+        # unrelated JSON objects (e.g., state, tool results, caches) in addition
+        # to a handful of message objects.
+        objs: Iterable[Dict[str, Any]] = _iter_message_objects_role_anchored(blob, roles=roles, max_objects=500)
+        got_any = False
+        for obj in objs:
+            got_any = True
             role = obj.get("role")
             if not isinstance(role, str) or role not in roles:
                 continue
@@ -316,6 +562,22 @@ def _extract_messages_from_connection(
             _append(role, text.strip())
             if stopped_early:
                 break
+        if (not got_any) and (b"{" in blob and b"\"role\"" in blob):
+            # Fallback: if the role-anchored scan couldn't find any message-like
+            # objects (e.g., unusual blob layout), fall back to the slower but
+            # more general embedded-object scan for this blob only.
+            for obj in _iter_embedded_json_objects(blob, max_objects=500):
+                role = obj.get("role")
+                if not isinstance(role, str) or role not in roles:
+                    continue
+                text = _extract_text_from_message(obj)
+                if not text:
+                    continue
+                if role == "user" and text.lstrip().startswith("<user_info>"):
+                    continue
+                _append(role, text.strip())
+                if stopped_early:
+                    break
         if stopped_early:
             break
 
@@ -374,6 +636,31 @@ def extract_recent_messages(
     if max_messages is not None and max_messages <= 0:
         return []
 
+    # When scanning the full DB (max_blobs=None), reuse a per-process cache keyed by a
+    # cheap blobs-table stamp. This makes repeated full-preview/export instant.
+    if max_blobs is None and store_db.exists():
+        db_key = store_db.as_posix()
+        roles_key = tuple(str(r) for r in roles)
+
+        def _op(con: sqlite3.Connection) -> List[Tuple[str, str]]:
+            stamp = _blobs_stamp(con)
+            cached = _full_cache_get(db_key, roles_key, stamp)
+            if cached is None:
+                cached = _extract_messages_from_connection(
+                    con,
+                    max_messages=None,
+                    max_blobs=None,
+                    roles=roles_key,
+                    from_start=False,
+                )
+                _full_cache_put(db_key, roles_key, stamp, cached)
+            if max_messages is None:
+                return cached
+            return cached[-max_messages:]
+
+        res = _with_ro_connection(store_db, _op)
+        return res if isinstance(res, list) else []
+
     def _op(con: sqlite3.Connection) -> List[Tuple[str, str]]:
         return _extract_messages_from_connection(
             con,
@@ -402,6 +689,29 @@ def extract_initial_messages(
     """
     if max_messages <= 0:
         return []
+
+    # If we already have a cached full-history extraction for this DB, serve the
+    # initial snippet from it without scanning/parsing blobs again. Importantly,
+    # we do NOT populate the full cache from here, so initial preview remains fast.
+    if max_blobs is None and store_db.exists():
+        db_key = store_db.as_posix()
+        roles_key = tuple(str(r) for r in roles)
+
+        def _op(con: sqlite3.Connection) -> List[Tuple[str, str]]:
+            stamp = _blobs_stamp(con)
+            cached = _full_cache_get(db_key, roles_key, stamp)
+            if cached is not None:
+                return cached[:max_messages]
+            return _extract_messages_from_connection(
+                con,
+                max_messages=max_messages,
+                max_blobs=None,
+                roles=roles_key,
+                from_start=True,
+            )
+
+        res = _with_ro_connection(store_db, _op)
+        return res if isinstance(res, list) else []
 
     def _op(con: sqlite3.Connection) -> List[Tuple[str, str]]:
         return _extract_messages_from_connection(

@@ -6,6 +6,7 @@ import queue
 import sys
 import threading
 import time
+import datetime
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set, Tuple, Union
@@ -27,6 +28,7 @@ from cursor_cli_manager.formatting import (
 from cursor_cli_manager.models import AgentChat, AgentWorkspace
 from cursor_cli_manager.update import UpdateStatus, check_for_update
 from cursor_cli_manager import __version__
+from cursor_cli_manager.exporting import build_export_filename, choose_nonconflicting_path, tab_complete_path, write_text_file
 
 
 @dataclass(frozen=True)
@@ -556,14 +558,26 @@ class UpdateRequested(Exception):
     """
 
 
-def _input_timeout_ms(*, bg_pending: bool, update_checking: bool) -> int:
+class ExportPendingExit(Exception):
+    """
+    Raised when the user quits while an export is still pending.
+    """
+
+    def __init__(self, *, out_path: Path, store_db_path: Path, chat_title: str) -> None:
+        super().__init__(str(out_path))
+        self.out_path = out_path
+        self.store_db_path = store_db_path
+        self.chat_title = chat_title
+
+
+def _input_timeout_ms(*, bg_pending: bool, update_checking: bool, ui_pending: bool = False) -> int:
     """
     Decide the curses input timeout.
 
     If we have background work (chat/preview loaders or version-check) we need
     to keep the UI loop ticking to apply results and refresh the screen.
     """
-    return 80 if (bg_pending or update_checking) else -1
+    return 80 if (bg_pending or update_checking or ui_pending) else -1
 
 
 def _is_quit_key(ch: int) -> bool:
@@ -578,6 +592,252 @@ def _is_quit_key(ch: int) -> bool:
 
 def _should_quit(*, ch: int, input_mode: Optional[str]) -> bool:
     return (input_mode is None) and _is_quit_key(ch)
+
+
+def disable_xon_xoff_flow_control() -> Optional[Tuple[int, object]]:
+    """
+    Disable terminal XON/XOFF (Ctrl+S/Ctrl+Q) flow control.
+
+    Many Linux terminals bind Ctrl+S to XOFF, which stops terminal output and can
+    make it look like the app is "frozen". Disabling IXON/IXOFF lets us use
+    Ctrl+S as an in-app shortcut.
+
+    Returns (fd, original_termios_attrs) to restore later, or None if not applicable.
+    """
+    try:
+        if not sys.stdin.isatty():
+            return None
+        fd = sys.stdin.fileno()
+    except Exception:
+        return None
+    try:
+        import termios  # POSIX
+    except Exception:
+        return None
+    try:
+        orig = termios.tcgetattr(fd)
+        attrs = list(orig)
+        iflag = int(attrs[0])
+        iflag2 = iflag & ~(getattr(termios, "IXON", 0) | getattr(termios, "IXOFF", 0))
+        if iflag2 != iflag:
+            attrs[0] = iflag2
+            termios.tcsetattr(fd, termios.TCSANOW, attrs)
+        return (fd, orig)
+    except Exception:
+        return None
+
+
+def restore_termios(saved: Optional[Tuple[int, object]]) -> None:
+    if not saved:
+        return
+    fd, orig = saved
+    try:
+        import termios  # POSIX
+
+        termios.tcsetattr(fd, termios.TCSANOW, orig)
+    except Exception:
+        return
+
+
+def _prompt_save_path(stdscr: "curses.window", *, default_path: Path) -> Optional[Path]:
+    """
+    Modal prompt to ask user for output path.
+
+    Returns the chosen Path or None if cancelled.
+    """
+    try:
+        max_y, max_x = stdscr.getmaxyx()
+    except Exception:
+        return None
+    # A tiny terminal can't show a usable prompt.
+    if max_y < 7 or max_x < 30:
+        return None
+
+    w = min(90, max_x - 4)
+    w = max(30, w)
+    h = 7
+    y = max(0, (max_y - h) // 2)
+    x = max(0, (max_x - w) // 2)
+    try:
+        win = stdscr.derwin(h, w, y, x)
+    except Exception:
+        return None
+    saved_escdelay: Optional[int] = None
+    try:
+        win.keypad(True)
+    except Exception:
+        pass
+    # Curses uses ESCDELAY to decide whether an ESC is a prefix (Alt / function-key
+    # sequences) or a standalone Escape. Default can be ~1000ms, which makes Esc
+    # feel laggy in modal dialogs. Lower it for the duration of this prompt.
+    try:
+        saved_escdelay = curses.get_escdelay()
+        curses.set_escdelay(25)
+    except Exception:
+        saved_escdelay = None
+    try:
+        # Make the input cursor visible while editing the path.
+        curses.curs_set(1)
+    except Exception:
+        pass
+    try:
+        win.timeout(-1)  # block for input
+    except Exception:
+        pass
+
+    text = str(default_path)
+    cursor = len(text)
+    offset = 0
+
+    label = "Save to:"
+    field_x = 2 + len(label) + 1
+    field_w = max(1, w - field_x - 2)
+
+    def _maybe_decode_esc_sequence(first: int) -> Optional[int]:
+        # If keypad translation doesn't work, arrow keys often arrive as:
+        #   ESC [ A/B/C/D  or  ESC O A/B/C/D
+        if first != 27:
+            return first
+        # We want ESC to cancel immediately, but still recognize arrow key sequences.
+        # So we do a tiny non-blocking read (with a very small budget) to see if the
+        # next bytes are already available.
+        n1 = -1
+        try:
+            win.timeout(0)
+            n1 = win.getch()
+            if n1 == -1:
+                # Give the terminal a very small window to deliver the rest of an
+                # arrow-key escape sequence; keeps ESC cancel feeling instant.
+                win.timeout(10)
+                n1 = win.getch()
+        except Exception:
+            return 27
+        finally:
+            try:
+                win.timeout(-1)
+            except Exception:
+                pass
+        if n1 == -1:
+            return 27  # real ESC (no sequence)
+        if n1 not in (ord("["), ord("O")):
+            return None
+        try:
+            # Same principle: avoid noticeable delay on cancellation, but allow a
+            # short window for the final byte of the sequence to arrive.
+            win.timeout(0)
+            n2 = win.getch()
+            if n2 == -1:
+                win.timeout(10)
+                n2 = win.getch()
+        except Exception:
+            return None
+        finally:
+            try:
+                win.timeout(-1)
+            except Exception:
+                pass
+        if n2 == -1:
+            return None
+        if n2 == ord("A"):
+            return curses.KEY_UP
+        if n2 == ord("B"):
+            return curses.KEY_DOWN
+        if n2 == ord("C"):
+            return curses.KEY_RIGHT
+        if n2 == ord("D"):
+            return curses.KEY_LEFT
+        return None
+
+    try:
+        while True:
+            try:
+                win.erase()
+            except Exception:
+                pass
+            try:
+                win.box()
+            except Exception:
+                pass
+            _safe_addstr(win, 0, 2, " Save chat history ", curses.A_REVERSE)
+            _safe_addstr(win, 2, 2, label, curses.A_BOLD)
+            _safe_addstr(win, 5, 2, "Enter: save   Esc: cancel", curses.A_DIM)
+
+            # Horizontal scrolling for long paths.
+            cursor = clamp(cursor, 0, len(text))
+            if cursor < offset:
+                offset = cursor
+            if cursor > offset + field_w:
+                offset = cursor - field_w
+            offset = clamp(offset, 0, max(0, len(text) - field_w))
+
+            vis = text[offset : offset + field_w]
+            _safe_addstr(win, 2, field_x, vis.ljust(field_w), 0)
+            try:
+                win.move(2, field_x + (cursor - offset))
+            except Exception:
+                pass
+
+            try:
+                win.noutrefresh()
+                curses.doupdate()
+            except Exception:
+                pass
+
+            try:
+                ch = win.getch()
+            except Exception:
+                return None
+
+            if ch == 27:
+                mapped = _maybe_decode_esc_sequence(ch)
+                if mapped is None:
+                    continue
+                if mapped == 27:
+                    return None
+                ch = mapped
+
+            if ch in (curses.KEY_ENTER, 10, 13):
+                s = (text or "").strip()
+                if not s:
+                    return None
+                return Path(s).expanduser()
+            if ch in (curses.KEY_BACKSPACE, 127, 8):
+                if cursor > 0:
+                    text = text[: cursor - 1] + text[cursor:]
+                    cursor -= 1
+                continue
+            if ch == 9:  # Tab
+                text, cursor = tab_complete_path(text, cursor)
+                continue
+            if ch == curses.KEY_LEFT:
+                cursor = max(0, cursor - 1)
+                continue
+            if ch == curses.KEY_RIGHT:
+                cursor = min(len(text), cursor + 1)
+                continue
+            if ch in (curses.KEY_UP, curses.KEY_DOWN):
+                # No-op (single-field dialog).
+                continue
+            if ch == curses.KEY_HOME:
+                cursor = 0
+                continue
+            if ch == curses.KEY_END:
+                cursor = len(text)
+                continue
+            if 32 <= ch <= 126:
+                text = text[:cursor] + chr(ch) + text[cursor:]
+                cursor += 1
+                continue
+    finally:
+        try:
+            curses.curs_set(0)
+        except Exception:
+            pass
+        if saved_escdelay is not None:
+            try:
+                curses.set_escdelay(int(saved_escdelay))
+            except Exception:
+                pass
 
 
 def _safe_addstr(win: "curses.window", y: int, x: int, s: str, attr: int = 0) -> None:
@@ -1186,6 +1446,16 @@ def select_chat(
 
     bg = _BackgroundLoader(load_chats=load_chats, load_preview_snippet=load_preview_snippet, load_preview_full=load_preview_full)
 
+    # Ephemeral user feedback in the status bar (expires automatically).
+    toast: Optional[Tuple[str, float]] = None  # (text, expires_at_monotonic)
+
+    # Pending export request (when user hits Ctrl+S before full history is ready).
+    export_pending: Optional[Tuple[str, Path]] = None  # (chat_id, output_path)
+
+    # Modal dialogs can draw over the panes without updating per-pane caches.
+    # Use this flag to force a full redraw on the next frame after a modal closes.
+    force_full_next = False
+
     # Best-effort auto-update check (non-blocking).
     update_q: "queue.Queue[UpdateStatus]" = queue.Queue()
     update_status: Optional[UpdateStatus] = None
@@ -1283,6 +1553,8 @@ def select_chat(
     while True:
         now = time.monotonic()
         spin = _spinner(now)
+        if toast is not None and now >= toast[1]:
+            toast = None
 
         # Apply update status results.
         try:
@@ -1333,16 +1605,31 @@ def select_chat(
                     )
                     preview_full_error.pop(chat_id, None)
                     preview_full_loading.discard(chat_id)
+                    if export_pending is not None and export_pending[0] == chat_id:
+                        out_path = export_pending[1]
+                        export_pending = None
+                        if isinstance(text, str) and text.strip():
+                            try:
+                                write_text_file(out_path, text)
+                                toast = (f"Saved: {out_path}", time.monotonic() + 4.0)
+                            except Exception as e:
+                                toast = (f"Save failed: {e}", time.monotonic() + 3.0)
+                        else:
+                            toast = ("Save failed: no history", time.monotonic() + 3.0)
             elif kind == "preview_full_err":
                 _, chat_id, err = item
                 if isinstance(chat_id, str):
                     preview_full_cache[chat_id] = (None, None)
                     preview_full_error[chat_id] = f"Failed to load preview: {err}"
                     preview_full_loading.discard(chat_id)
+                    if export_pending is not None and export_pending[0] == chat_id:
+                        export_pending = None
+                        toast = (f"Save failed: {err}", time.monotonic() + 3.0)
 
         max_y, max_x = stdscr.getmaxyx()
         layout = compute_layout(max_y, max_x)
-        force_full = renderer.ensure(layout, max_y, max_x)
+        force_full = renderer.ensure(layout, max_y, max_x) or force_full_next
+        force_full_next = False
         preview_inner_h = max(0, layout.preview.h - 2)
         preview_inner_w = max(0, layout.preview.w - 2)
 
@@ -1502,6 +1789,17 @@ def select_chat(
             status = "Type to search. Enter: apply  Esc: cancel"
         elif focus == "preview":
             status = "↑/↓ PgUp/PgDn: scroll preview  Tab/Left/Right: switch  q: quit"
+        # Hint: save is available when a real chat with history is selected and we know the workspace path.
+        if (
+            toast is None
+            and input_mode is None
+            and selected_chat is not None
+            and isinstance(selected_chat.latest_root_blob_id, str)
+            and bool(selected_chat.latest_root_blob_id)
+        ):
+            status = status + "  Ctrl+S: save"
+        if toast is not None:
+            status = toast[0]
         # Right-bottom update info:
         # - Up-to-date: show version + "latest"
         # - Can't check: show version only
@@ -1637,7 +1935,8 @@ def select_chat(
 
         # Poll while background work is in progress, otherwise block on input.
         try:
-            stdscr.timeout(_input_timeout_ms(bg_pending=bg.has_pending(), update_checking=update_checking))
+            ui_pending = bool(toast is not None or export_pending is not None or not update_q.empty())
+            stdscr.timeout(_input_timeout_ms(bg_pending=bg.has_pending(), update_checking=update_checking, ui_pending=ui_pending))
         except Exception:
             pass
 
@@ -1649,6 +1948,15 @@ def select_chat(
             continue
 
         if _should_quit(ch=ch, input_mode=input_mode):
+            if export_pending is not None:
+                chat_id, out_path = export_pending
+                # Finish saving after curses exits (handled by CLI).
+                if selected_chat is not None and selected_chat.chat_id == chat_id:
+                    raise ExportPendingExit(
+                        out_path=out_path,
+                        store_db_path=selected_chat.store_db_path,
+                        chat_title=selected_chat.name or "chat",
+                    )
             return None
 
         if input_mode:
@@ -1676,6 +1984,65 @@ def select_chat(
         if ch == 21:  # ^U
             if update_status and update_status.supported and update_status.update_available:
                 raise UpdateRequested()
+            continue
+
+        # Ctrl+S: save chat history (best-effort; writes to workspace folder).
+        if ch == 19:  # ^S
+            if selected_chat is None or not selected_chat.chat_id:
+                toast = ("Save failed: no chat selected", time.monotonic() + 3.0)
+                continue
+            if not selected_chat.latest_root_blob_id:
+                toast = ("Save failed: chat has no history", time.monotonic() + 3.0)
+                continue
+
+            base_dir = ws.workspace_path if (ws is not None and ws.workspace_path is not None) else Path.cwd()
+            title = selected_chat.name or "chat"
+            fname = build_export_filename(title=title, when=datetime.datetime.now(), ext=".md", max_title_len=80)
+            default_path = base_dir / fname
+
+            chosen = _prompt_save_path(stdscr, default_path=default_path)
+            # Force redraw to remove modal window artifacts.
+            force_full_next = True
+            if chosen is None:
+                toast = ("Save cancelled", time.monotonic() + 2.0)
+                continue
+
+            # Allow entering a directory; in that case use default filename inside it.
+            s = str(chosen)
+            if s.endswith("/") or s.endswith("\\") or (chosen.exists() and chosen.is_dir()):
+                out_path = chosen / fname
+            else:
+                out_path = chosen
+
+            # Normalize for display/writing.
+            try:
+                out_path = out_path.expanduser()
+            except Exception:
+                pass
+            if not out_path.is_absolute():
+                out_path = (Path.cwd() / out_path).absolute()
+
+            # Avoid silent overwrite: choose a non-conflicting path.
+            out_path = choose_nonconflicting_path(out_path.parent, out_path.name)
+
+            cached = preview_full_cache.get(selected_chat.chat_id)
+            if cached and isinstance(cached[1], str) and cached[1].strip():
+                try:
+                    write_text_file(out_path, cached[1])
+                    toast = (f"Saved: {out_path}", time.monotonic() + 4.0)
+                except Exception as e:
+                    toast = (f"Save failed: {e}", time.monotonic() + 3.0)
+                continue
+
+            export_pending = (selected_chat.chat_id, out_path)
+            # Create the file immediately so the user can see the target path right away,
+            # then overwrite it once the full history finishes loading.
+            try:
+                write_text_file(out_path, "")
+            except Exception:
+                pass
+            get_preview_full(selected_chat)
+            toast = (f"Saving… {out_path}", time.monotonic() + 3600.0)
             continue
 
         if ch in (9,):  # Tab

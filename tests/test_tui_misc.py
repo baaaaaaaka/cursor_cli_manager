@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple
 from unittest.mock import patch
 
 from cursor_cli_manager.tui import Rect, _Pane, _sync_output_begin, _sync_output_end, probe_synchronized_output_support
+from cursor_cli_manager.tui import disable_xon_xoff_flow_control, restore_termios
 
 
 @dataclass
@@ -66,6 +67,14 @@ class TestTuiMisc(unittest.TestCase):
             # Must not raise.
             _sync_output_begin()
             _sync_output_end()
+
+    def test_disable_xon_xoff_returns_none_when_not_tty(self) -> None:
+        with patch("sys.stdin.isatty", return_value=False):
+            self.assertIsNone(disable_xon_xoff_flow_control())
+
+    def test_restore_termios_is_noop_on_none(self) -> None:
+        # Must not raise.
+        restore_termios(None)
 
 
 if __name__ == "__main__":
