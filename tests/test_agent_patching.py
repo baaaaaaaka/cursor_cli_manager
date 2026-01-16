@@ -82,7 +82,7 @@ class TestAgentPatching(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             versions_dir = root / "somewhere" / "versions"
-            v = versions_dir / "2026.01.09-231024f"
+            v = versions_dir / "test-version"
             v.mkdir(parents=True, exist_ok=True)
             (v / "cursor-agent").write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
             (v / "8658.index.js").write_text(SAMPLE_JS, encoding="utf-8")
@@ -95,7 +95,7 @@ class TestAgentPatching(unittest.TestCase):
     def test_patch_cursor_agent_models_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             versions_dir = Path(td) / "versions"
-            v1 = versions_dir / "2026.01.09-231024f"
+            v1 = versions_dir / "test-version"
             v1.mkdir(parents=True, exist_ok=True)
             js = v1 / "8658.index.js"
             js.write_text(SAMPLE_JS, encoding="utf-8")
@@ -130,7 +130,7 @@ class TestAgentPatching(unittest.TestCase):
         ) + "\n/* CCM_PATCH_AVAILABLE_MODELS */\n"
         with tempfile.TemporaryDirectory() as td:
             versions_dir = Path(td) / "versions"
-            vdir = versions_dir / "2026.01.09-231024f"
+            vdir = versions_dir / "test-version"
             vdir.mkdir(parents=True, exist_ok=True)
             js = vdir / "8658.index.js"
             js.write_text(v1_patched, encoding="utf-8")
@@ -150,7 +150,7 @@ class TestAgentPatching(unittest.TestCase):
         ) + "\n/* CCM_PATCH_AVAILABLE_MODELS_V2 */\n"
         with tempfile.TemporaryDirectory() as td:
             versions_dir = Path(td) / "versions"
-            vdir = versions_dir / "2026.01.09-231024f"
+            vdir = versions_dir / "test-version"
             vdir.mkdir(parents=True, exist_ok=True)
             js = vdir / "8658.index.js"
             js.write_text(v2_patched, encoding="utf-8")
