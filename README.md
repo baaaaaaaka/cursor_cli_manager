@@ -24,23 +24,26 @@ curl -fsSL https://raw.githubusercontent.com/baaaaaaaka/cursor_cli_manager/main/
 
 This will:
 
-- Detect your OS/arch and download the matching `ccm` binary from GitHub Releases
-- Install it into `~/.local/bin/ccm` (creates the directory if needed)
+- Detect your OS/arch and download the matching `ccm` bundle from GitHub Releases
+- Extract it into `~/.local/lib/ccm` and create symlinks in `~/.local/bin`:
+  - `ccm`
+  - `cursor-cli-manager`
 
 Tip: for stability/security, pin the installer to a tag (or commit SHA):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/baaaaaaaka/cursor_cli_manager/v0.5.6/scripts/install_ccm.sh | sh
+curl -fsSL https://raw.githubusercontent.com/baaaaaaaka/cursor_cli_manager/v0.5.7/scripts/install_ccm.sh | sh
 ```
 
 Notes:
 
 - You can override the GitHub repo via `CCM_GITHUB_REPO=owner/name`
 - Choose install dir via `CCM_INSTALL_DEST=/some/dir`
+- Choose bundle install root via `CCM_INSTALL_ROOT=/some/dir`
 
 After installing:
 
-- If installed via **binary**, you will have `ccm`
+- If installed via **binary**, you will have `ccm` and `cursor-cli-manager`
 - If installed via **pip**, you will have `ccm` and `cursor-cli-manager`
 
 ### From Git (recommended)

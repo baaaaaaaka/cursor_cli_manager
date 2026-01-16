@@ -169,6 +169,8 @@ def _run_tui(
     agent_dirs: CursorAgentDirs,
     workspaces: List[AgentWorkspace],
 ) -> Optional[Tuple[AgentWorkspace, Optional[AgentChat]]]:
+    _prepare_curses_term_for_tui()
+
     # Best-effort: enable xterm synchronized output only when we can confirm support.
     # This can reduce flicker on some terminals, and is a no-op when disabled.
     sync_output = False
@@ -212,6 +214,72 @@ def _run_tui(
         return curses.wrapper(_inner)
     finally:
         restore_termios(flow_saved)
+
+
+def _prepare_curses_term_for_tui() -> None:
+    """
+    Best-effort terminal preflight before starting curses.
+
+    Motivation:
+    - Some remote systems (HPC/login nodes) don't have terminfo entries for modern
+      $TERM values (e.g. "xterm-kitty", "wezterm").
+    - PyInstaller one-file binaries may run on systems without a usable terminfo DB.
+
+    We:
+    - Try the current $TERM and a few common fallbacks.
+    - If all fail and we are running as a frozen binary with bundled terminfo,
+      set TERMINFO to the bundled database and retry.
+    """
+    try:
+        current_term = (os.environ.get("TERM") or "").strip()
+        candidates: List[str] = []
+        if current_term:
+            candidates.append(current_term)
+        candidates.extend(["xterm-256color", "xterm", "screen-256color", "screen", "vt100", "linux"])
+
+        def _try_terms() -> bool:
+            seen = set()
+            for t in candidates:
+                if not t or t in seen:
+                    continue
+                seen.add(t)
+                try:
+                    curses.setupterm(term=t, fd=1)
+                    if t != current_term:
+                        os.environ["TERM"] = t
+                    return True
+                except Exception:
+                    continue
+            return False
+
+        if _try_terms():
+            return
+
+        # If we have a bundled terminfo DB (PyInstaller), try again using it.
+        bundled = None
+        try:
+            if getattr(sys, "frozen", False):
+                mp = getattr(sys, "_MEIPASS", None)
+                if isinstance(mp, str) and mp:
+                    p = Path(mp) / "terminfo"
+                    if p.is_dir():
+                        bundled = str(p)
+                if bundled is None:
+                    try:
+                        p2 = Path(sys.executable).resolve().parent / "terminfo"
+                        if p2.is_dir():
+                            bundled = str(p2)
+                    except Exception:
+                        bundled = None
+        except Exception:
+            bundled = None
+
+        if bundled and not os.environ.get("TERMINFO"):
+            os.environ["TERMINFO"] = bundled
+            _try_terms()
+    except Exception:
+        # If this preflight fails, curses.wrapper() will surface the error.
+        return
 
 
 def _pin_cwd_workspace(agent_dirs: CursorAgentDirs, workspaces: List[AgentWorkspace]) -> List[AgentWorkspace]:
@@ -275,6 +343,18 @@ def cmd_tui(
         try:
             selection = _run_tui(agent_dirs, workspaces)
             break
+        except curses.error as e:
+            term = os.environ.get("TERM")
+            msg = str(e) or "curses error"
+            print(f"Error: failed to initialize terminal UI: {msg}", file=sys.stderr)
+            if term:
+                print(f"Tip: your TERM is {term!r}. If this system lacks terminfo for it, try:", file=sys.stderr)
+            else:
+                print("Tip: TERM is not set. Try:", file=sys.stderr)
+            print("  TERM=xterm-256color ccm", file=sys.stderr)
+            print("  TERM=xterm ccm", file=sys.stderr)
+            print("Tip: if you are running without a TTY, use `ccm list` or `ccm doctor`.", file=sys.stderr)
+            return 2
         except ExportPendingExit as e:
             # Finish saving after curses exits so the user sees progress in the normal terminal.
             out_path = e.out_path

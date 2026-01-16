@@ -16,7 +16,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${ROOT}/out"
-ASSET_NAME="ccm-linux-x86_64-glibc217"
+ASSET_NAME="ccm-linux-x86_64-glibc217.tar.gz"
 
 IMAGE="${CCM_LINUX_BUILDER_IMAGE:-ghcr.io/baaaaaaaka/ccm-linux-builder:py311}"
 
@@ -37,9 +37,9 @@ docker run --rm \
   /bin/bash -lc "
     set -euxo pipefail
     cd /work
-    python3 -m PyInstaller --clean -F -n ccm --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
-    cp out/_dist/ccm out/${ASSET_NAME}
-    chmod 755 out/${ASSET_NAME}
+    python3 -m PyInstaller --clean -n ccm --add-data \"/opt/terminfo:terminfo\" --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
+    # Package the onedir output as a tarball for release distribution.
+    tar -C out/_dist -czf out/${ASSET_NAME} ccm
   "
 
 echo "Built ${OUT_DIR}/${ASSET_NAME}"

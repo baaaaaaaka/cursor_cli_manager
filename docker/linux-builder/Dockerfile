@@ -35,6 +35,18 @@ RUN set -euxo pipefail; \
     make install; \
     rm -rf "/tmp/Python-${PYVER}" "/tmp/Python-${PYVER}.tgz"
 
+# Prepare a minimal bundled terminfo database for common TERM values.
+# This helps the one-file binary run on systems that lack terminfo entries
+# for modern terminal types (common on HPC/login nodes).
+RUN set -euxo pipefail; \
+    mkdir -p /opt/terminfo /tmp/ccm-terminfo; \
+    for t in xterm-256color xterm screen-256color screen vt100 linux; do \
+      infocmp -x "$t" > "/tmp/ccm-terminfo/$t"; \
+      tic -x -o /opt/terminfo "/tmp/ccm-terminfo/$t"; \
+    done; \
+    chmod -R a+rX /opt/terminfo; \
+    rm -rf /tmp/ccm-terminfo
+
 ENV PATH="/opt/python/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/opt/python/lib:/opt/openssl/lib"
 ENV PIP_DISABLE_PIP_VERSION_CHECK="1"

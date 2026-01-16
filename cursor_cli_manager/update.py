@@ -9,12 +9,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
+import shutil
+
 from cursor_cli_manager import __version__
 from cursor_cli_manager.github_release import (
     Fetch,
-    download_and_install_release_binary,
+    download_and_install_release_bundle,
     fetch_latest_release,
     get_github_repo,
+    get_install_bin_dir,
+    get_install_root_dir,
     is_frozen_binary,
     is_version_newer,
     select_release_asset_name,
@@ -316,22 +320,45 @@ def perform_update(
             else:
                 rel = fetch_latest_release(repo, timeout_s=timeout_s, fetch=fetch)
             asset_name = select_release_asset_name()
-            dest = Path(sys.executable).resolve()
+
+            # Determine install dirs (env override > infer from PATH/executable > defaults).
+            bin_dir = get_install_bin_dir()
+            root_dir = get_install_root_dir()
+            try:
+                which = shutil.which("ccm")
+                if which:
+                    bin_dir = Path(which).expanduser().resolve().parent
+            except Exception:
+                pass
+            try:
+                # Only infer from sys.executable if it matches our onedir layout:
+                #   <root>/versions/<tag>/ccm/ccm  OR  <root>/current/ccm/ccm
+                exe = Path(sys.executable).resolve()
+                if exe.name == "ccm" and exe.parent.name == "ccm":
+                    if exe.parent.parent.name == "current":
+                        root_dir = exe.parent.parent.parent
+                    elif exe.parent.parent.parent.name == "versions":
+                        root_dir = exe.parent.parent.parent.parent
+            except Exception:
+                pass
+
             if fetch is None:
-                download_and_install_release_binary(
+                download_and_install_release_bundle(
                     repo=repo,
                     tag=rel.tag,
                     asset_name=asset_name,
-                    dest_path=dest,
+                    install_root=root_dir,
+                    bin_dir=bin_dir,
                     timeout_s=timeout_s,
                     verify_checksums=True,
                 )
             else:
-                download_and_install_release_binary(
+                download_and_install_release_bundle(
                     repo=repo,
                     tag=rel.tag,
                     asset_name=asset_name,
-                    dest_path=dest,
+                    install_root=root_dir,
+                    bin_dir=bin_dir,
                     timeout_s=timeout_s,
                     fetch=fetch,
                     verify_checksums=True,

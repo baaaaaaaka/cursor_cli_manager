@@ -1,19 +1,26 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import os
 import platform
 import stat
 import sys
+import tarfile
 import tempfile
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
+import shutil
+
 
 ENV_CCM_GITHUB_REPO = "CCM_GITHUB_REPO"  # e.g. "baaaaaaaka/cursor_cli_manager"
 DEFAULT_GITHUB_REPO = "baaaaaaaka/cursor_cli_manager"
+ENV_CCM_INSTALL_DEST = "CCM_INSTALL_DEST"
+ENV_CCM_INSTALL_ROOT = "CCM_INSTALL_ROOT"
 
 
 Fetch = Callable[[str, float, Dict[str, str]], bytes]
@@ -36,6 +43,28 @@ def _http_headers() -> Dict[str, str]:
 def get_github_repo() -> str:
     v = os.environ.get(ENV_CCM_GITHUB_REPO)
     return (v.strip() if isinstance(v, str) and v.strip() else DEFAULT_GITHUB_REPO)
+
+
+def default_install_bin_dir() -> Path:
+    return Path.home() / ".local" / "bin"
+
+
+def default_install_root_dir() -> Path:
+    return Path.home() / ".local" / "lib" / "ccm"
+
+
+def get_install_bin_dir() -> Path:
+    v = os.environ.get(ENV_CCM_INSTALL_DEST)
+    if isinstance(v, str) and v.strip():
+        return Path(v).expanduser()
+    return default_install_bin_dir()
+
+
+def get_install_root_dir() -> Path:
+    v = os.environ.get(ENV_CCM_INSTALL_ROOT)
+    if isinstance(v, str) and v.strip():
+        return Path(v).expanduser()
+    return default_install_root_dir()
 
 
 def split_repo(repo: str) -> Tuple[str, str]:
@@ -175,9 +204,9 @@ def select_release_asset_name(*, system: Optional[str] = None, machine: Optional
     Choose the Release asset name for the current platform.
 
     Naming convention (expected on GitHub Releases):
-    - ccm-linux-x86_64-glibc217
-    - ccm-macos-x86_64
-    - ccm-macos-arm64
+    - ccm-linux-x86_64-glibc217.tar.gz
+    - ccm-macos-x86_64.tar.gz
+    - ccm-macos-arm64.tar.gz
     """
     sysname = (system or platform.system() or "").lower()
     arch = _normalize_arch(machine or platform.machine())
@@ -190,13 +219,13 @@ def select_release_asset_name(*, system: Optional[str] = None, machine: Optional
             raise RuntimeError("Unsupported Linux libc: need glibc >= 2.17")
         if gv < (2, 17):
             raise RuntimeError(f"Unsupported glibc: {gv[0]}.{gv[1]} (need >= 2.17)")
-        return "ccm-linux-x86_64-glibc217"
+        return "ccm-linux-x86_64-glibc217.tar.gz"
 
     if sysname == "darwin":
         if arch == "x86_64":
-            return "ccm-macos-x86_64"
+            return "ccm-macos-x86_64.tar.gz"
         if arch == "arm64":
-            return "ccm-macos-arm64"
+            return "ccm-macos-arm64.tar.gz"
         raise RuntimeError(f"Unsupported macOS arch: {arch}")
 
     raise RuntimeError(f"Unsupported OS: {sysname}")
@@ -247,6 +276,48 @@ def sha256_file(path: Path) -> str:
 def _atomic_replace(src: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     os.replace(str(src), str(dest))
+
+
+def _atomic_symlink(target: Path, link: Path) -> None:
+    """
+    Atomically replace link with a symlink to target (best-effort).
+    """
+    link.parent.mkdir(parents=True, exist_ok=True)
+    tmp = link.with_name(f".{link.name}.{os.getpid()}.tmp")
+    try:
+        if tmp.exists() or tmp.is_symlink():
+            tmp.unlink()
+    except Exception:
+        pass
+    os.symlink(str(target), str(tmp))
+    os.replace(str(tmp), str(link))
+
+
+def _safe_extract_tar_gz(data: bytes, *, dest_dir: Path) -> None:
+    """
+    Extract a .tar.gz payload into dest_dir with basic path traversal checks.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+        members = tf.getmembers()
+        for m in members:
+            name = m.name or ""
+            # Disallow absolute paths and path traversal.
+            if name.startswith(("/", "\\")):
+                raise RuntimeError(f"unsafe tar member path: {name!r}")
+            parts = Path(name).parts
+            if any(p == ".." for p in parts):
+                raise RuntimeError(f"unsafe tar member path: {name!r}")
+            if m.issym() or m.islnk():
+                ln = m.linkname or ""
+                if ln.startswith(("/", "\\")) or any(p == ".." for p in Path(ln).parts):
+                    raise RuntimeError(f"unsafe tar link target: {name!r} -> {ln!r}")
+        # Python 3.14 changes tar extraction defaults; we already validate members,
+        # so prefer preserving metadata when supported.
+        try:
+            tf.extractall(path=str(dest_dir), filter="fully_trusted")  # type: ignore[call-arg]
+        except TypeError:
+            tf.extractall(path=str(dest_dir))
 
 
 def download_and_install_release_binary(
@@ -310,5 +381,105 @@ def download_and_install_release_binary(
 
 
 def default_install_path() -> Path:
-    return Path.home() / ".local" / "bin" / "ccm"
+    return get_install_bin_dir() / "ccm"
+
+
+def download_and_install_release_bundle(
+    *,
+    repo: str,
+    tag: str,
+    asset_name: str,
+    install_root: Path,
+    bin_dir: Path,
+    timeout_s: float = 30.0,
+    fetch: Fetch = _default_fetch,
+    verify_checksums: bool = True,
+) -> Path:
+    """
+    Download and install an onedir bundle (tar.gz) from GitHub Releases.
+
+    Layout:
+      <install_root>/versions/<tag>/ccm/ccm   (executable inside bundle)
+      <install_root>/current -> versions/<tag>
+      <bin_dir>/ccm -> <install_root>/current/ccm/ccm
+      <bin_dir>/cursor-cli-manager -> ccm
+    """
+    if not asset_name.endswith(".tar.gz"):
+        raise RuntimeError(f"unsupported bundle asset: {asset_name} (expected .tar.gz)")
+
+    url = build_release_download_url(repo, tag=tag, asset_name=asset_name)
+    data = fetch(url, timeout_s, _http_headers())
+
+    checksums: Dict[str, str] = {}
+    if verify_checksums:
+        try:
+            c_url = build_checksums_download_url(repo, tag=tag)
+            c_raw = fetch(c_url, timeout_s, _http_headers())
+            checksums = parse_checksums_txt(c_raw.decode("utf-8", "replace"))
+        except Exception:
+            checksums = {}
+
+    if verify_checksums and checksums:
+        expected = checksums.get(asset_name)
+        if expected:
+            actual = hashlib.sha256(data).hexdigest()
+            if actual.lower() != expected.lower():
+                raise RuntimeError(f"checksum mismatch for {asset_name}: expected {expected}, got {actual}")
+
+    install_root = install_root.expanduser()
+    bin_dir = bin_dir.expanduser()
+    versions_dir = install_root / "versions"
+    versions_dir.mkdir(parents=True, exist_ok=True)
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix=".ccm-extract-", dir=str(versions_dir)))
+    try:
+        _safe_extract_tar_gz(data, dest_dir=tmp_dir)
+        exe = tmp_dir / "ccm" / "ccm"
+        if not exe.exists():
+            raise RuntimeError(f"invalid bundle: missing {exe}")
+        try:
+            st = exe.stat()
+            os.chmod(str(exe), st.st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        except Exception:
+            pass
+
+        version_dir = versions_dir / tag
+        # Replace existing version directory (best-effort).
+        if version_dir.exists():
+            try:
+                shutil.rmtree(version_dir)
+            except Exception:
+                pass
+        os.replace(str(tmp_dir), str(version_dir))
+
+        current = install_root / "current"
+        _atomic_symlink(version_dir, current)
+
+        target_exe = current / "ccm" / "ccm"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_symlink(target_exe, bin_dir / "ccm")
+
+        # pip-style alias
+        alias = bin_dir / "cursor-cli-manager"
+        try:
+            if alias.exists() or alias.is_symlink():
+                alias.unlink()
+        except Exception:
+            pass
+        try:
+            os.symlink("ccm", str(alias))
+        except Exception:
+            # Fallback: point alias directly at target (may break if moved).
+            try:
+                _atomic_symlink(target_exe, alias)
+            except Exception:
+                pass
+
+        return target_exe
+    finally:
+        if tmp_dir.exists():
+            try:
+                shutil.rmtree(tmp_dir)
+            except Exception:
+                pass
 

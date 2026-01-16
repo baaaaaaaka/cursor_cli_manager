@@ -32,8 +32,8 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ccm-linux-x86_64-glibc217
-          path: out/ccm-linux-x86_64-glibc217
+          name: ccm-linux-x86_64-glibc217.tar.gz
+          path: out/ccm-linux-x86_64-glibc217.tar.gz
 
   build-macos-x86_64:
     runs-on: macos-15-intel
@@ -47,16 +47,13 @@ jobs:
         run: |
           set -euxo pipefail
           python -m pip install -U pip "setuptools<69" wheel pyinstaller
-          python -m pip install -e .
-          python -m PyInstaller --clean -F -n ccm cursor_cli_manager/__main__.py
-          mkdir -p out
-          cp dist/ccm out/ccm-macos-x86_64
-          chmod 755 out/ccm-macos-x86_64
+          python -m PyInstaller --clean -n ccm --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
+          tar -C out/_dist -czf out/ccm-macos-x86_64.tar.gz ccm
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ccm-macos-x86_64
-          path: out/ccm-macos-x86_64
+          name: ccm-macos-x86_64.tar.gz
+          path: out/ccm-macos-x86_64.tar.gz
 
   build-macos-arm64:
     runs-on: macos-latest
@@ -70,16 +67,13 @@ jobs:
         run: |
           set -euxo pipefail
           python -m pip install -U pip "setuptools<69" wheel pyinstaller
-          python -m pip install -e .
-          python -m PyInstaller --clean -F -n ccm cursor_cli_manager/__main__.py
-          mkdir -p out
-          cp dist/ccm out/ccm-macos-arm64
-          chmod 755 out/ccm-macos-arm64
+          python -m PyInstaller --clean -n ccm --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
+          tar -C out/_dist -czf out/ccm-macos-arm64.tar.gz ccm
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ccm-macos-arm64
-          path: out/ccm-macos-arm64
+          name: ccm-macos-arm64.tar.gz
+          path: out/ccm-macos-arm64.tar.gz
 
   publish:
     runs-on: ubuntu-latest
@@ -98,7 +92,7 @@ jobs:
       - name: Prepare checksums.txt
         run: |
           set -euxo pipefail
-          sha256sum dist/ccm-* > dist/checksums.txt
+          sha256sum dist/ccm-*.tar.gz > dist/checksums.txt
           ls -la dist
 
       - name: Publish GitHub Release
