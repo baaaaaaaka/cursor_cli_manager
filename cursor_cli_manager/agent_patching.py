@@ -12,6 +12,7 @@ ENV_CCM_CURSOR_AGENT_VERSIONS_DIR = "CCM_CURSOR_AGENT_VERSIONS_DIR"
 ENV_CURSOR_AGENT_VERSIONS_DIR = "CURSOR_AGENT_VERSIONS_DIR"
 
 _PATCH_MARKER = "CCM_PATCH_AVAILABLE_MODELS_NORMALIZED"
+_PATCH_SIGNATURE = "CCM_PATCH_MODELDETAILS_ONLY"
 
 
 def _is_truthy(v: Optional[str]) -> bool:
@@ -216,7 +217,10 @@ def _patch_fetch_usable_models_block(block: str) -> Optional[str]:
     """
     Return a patched replacement block, or None if not patchable.
     """
-    if _PATCH_MARKER in block:
+    # Idempotence / upgrade:
+    # - If both marker + signature exist, we assume it's already at the current patch level.
+    # - If marker exists but signature doesn't, treat as an older patch and allow upgrade.
+    if _PATCH_MARKER in block and _PATCH_SIGNATURE in block:
         return None
     if "getUsableModels" not in block and "availableModels" not in block and "getAvailableModels" not in block:
         return None
@@ -242,6 +246,8 @@ def _patch_fetch_usable_models_block(block: str) -> Optional[str]:
         "            .map(m => {\n"
         "            if (!m)\n"
         "                return null;\n"
+        "            if (m.supportsAgent === false || m.supports_agent === false)\n"
+        "                return null;\n"
         "            // Normalize shapes across GetUsableModels vs AvailableModels.\n"
         "            const modelId = (m.modelId || m.name || m.serverModelName || m.server_model_name || \"\");\n"
         "            const displayModelId = (m.displayModelId || m.inputboxShortModelName || m.inputbox_short_model_name || m.clientDisplayName || m.client_display_name || m.name || modelId || \"\");\n"
@@ -249,15 +255,23 @@ def _patch_fetch_usable_models_block(block: str) -> Optional[str]:
         "            const displayNameShort = (m.displayNameShort || m.display_name_short || m.inputboxShortModelName || m.inputbox_short_model_name);\n"
         "            if (!modelId || !displayModelId)\n"
         "                return null;\n"
-        "            // Preserve original fields while ensuring required ones are present.\n"
-        "            return Object.assign(Object.assign({}, m), { modelId, displayModelId, displayName, displayNameShort });\n"
+        "            // Return only agent.v1.ModelDetails-compatible keys (avoid persisting unknown keys into config).\n"
+        "            const aliases = Array.isArray(m.aliases)\n"
+        "                ? m.aliases.filter(a => typeof a === \"string\")\n"
+        "                : [];\n"
+        "            const out = { modelId, displayModelId, displayName, displayNameShort: (displayNameShort || displayName), aliases };\n"
+        "            if (m.maxMode === true || m.max_mode === true)\n"
+        "                out.maxMode = true;\n"
+        "            if (m.thinkingDetails)\n"
+        "                out.thinkingDetails = m.thinkingDetails;\n"
+        "            return out;\n"
         "        })\n"
         "            .filter(Boolean);\n"
-        "        const models = _ccm_normalized.filter(m => !!(m && (m.supportsAgent === true || m.supports_agent === true)));\n"
+        "        const models = _ccm_normalized;\n"
         "        return models.length > 0 ? models : undefined;\n"
         "    });\n"
         "}\n"
-        f"/* {_PATCH_MARKER} */\n"
+        f"/* {_PATCH_MARKER} {_PATCH_SIGNATURE} */\n"
     )
 
 
@@ -294,7 +308,8 @@ def patch_cursor_agent_models(
                 rep.errors.append((p, f"read failed: {e}"))
                 continue
 
-            if _PATCH_MARKER in txt:
+            # Skip only if we detect the current patch signature; otherwise allow upgrades.
+            if _PATCH_MARKER in txt and _PATCH_SIGNATURE in txt:
                 rep.skipped_already_patched += 1
                 continue
 

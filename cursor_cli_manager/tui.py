@@ -550,6 +550,31 @@ class PreviewState:
         self.move(delta_pages * max(1, view_h), n_lines, view_h)
 
 
+def _preview_find_matches(lines: List[str], needle: str) -> List[int]:
+    """
+    Case-insensitive substring search over preview lines.
+
+    Returns the line indices that contain the needle. Empty needle => [].
+    """
+    n = (needle or "").strip()
+    if not n:
+        return []
+    nl = n.lower()
+    out: List[int] = []
+    for i, ln in enumerate(lines):
+        if nl in (ln or "").lower():
+            out.append(i)
+    return out
+
+
+def _preview_scroll_to_match(match_line: int, *, view_h: int) -> int:
+    """
+    Choose a scroll offset that makes `match_line` visible (best-effort centered).
+    """
+    vh = max(1, int(view_h or 1))
+    return max(0, int(match_line) - (vh // 2))
+
+
 class UpdateRequested(Exception):
     """
     Raised from inside the TUI when the user triggers an in-app upgrade.
@@ -1019,6 +1044,7 @@ class _Pane:
         lines: List[str],
         start: int,
         *,
+        line_attrs: Optional[Dict[int, int]] = None,
         use_terminal_scroll: bool = False,
         bottom_overlay: Optional[Tuple[str, int]] = None,
         force: bool = False,
@@ -1061,6 +1087,11 @@ class _Pane:
         last = self._preview_last_start
         diff = 0 if last is None else (start - last)
 
+        def _attr_for_line(idx: int) -> int:
+            if not line_attrs:
+                return 0
+            return int(line_attrs.get(idx, 0) or 0)
+
         def _apply_overlay(changed: bool) -> bool:
             if bottom_overlay is None or inner_h <= 0:
                 return changed
@@ -1083,9 +1114,10 @@ class _Pane:
                 idx = start + row
                 s = lines[idx] if idx < len(lines) else ""
                 s = pad_to_width(truncate_to_width(s, inner_w), inner_w)
-                if force or self._inner_cache[row] != (s, 0):
-                    _safe_addstr(self.inner, row, 0, s, 0)
-                    self._inner_cache[row] = (s, 0)
+                a = _attr_for_line(idx)
+                if force or self._inner_cache[row] != (s, a):
+                    _safe_addstr(self.inner, row, 0, s, a)
+                    self._inner_cache[row] = (s, a)
                     changed = True
             changed = _apply_overlay(changed)
             self._preview_last_start = start
@@ -1103,9 +1135,10 @@ class _Pane:
                 idx = start + row
                 s = lines[idx] if idx < len(lines) else ""
                 s = pad_to_width(truncate_to_width(s, inner_w), inner_w)
-                if force or self._inner_cache[row] != (s, 0):
-                    _safe_addstr(self.inner, row, 0, s, 0)
-                    self._inner_cache[row] = (s, 0)
+                a = _attr_for_line(idx)
+                if force or self._inner_cache[row] != (s, a):
+                    _safe_addstr(self.inner, row, 0, s, a)
+                    self._inner_cache[row] = (s, a)
                     changed = True
             changed = _apply_overlay(changed)
             self._preview_last_start = start
@@ -1141,9 +1174,10 @@ class _Pane:
                     idx = start + row
                     s = lines[idx] if idx < len(lines) else ""
                     s = pad_to_width(truncate_to_width(s, inner_w), inner_w)
-                    if self._inner_cache[row] != (s, 0):
-                        _safe_addstr(self.inner, row, 0, s, 0)
-                        self._inner_cache[row] = (s, 0)
+                    a = _attr_for_line(idx)
+                    if self._inner_cache[row] != (s, a):
+                        _safe_addstr(self.inner, row, 0, s, a)
+                        self._inner_cache[row] = (s, a)
                 self._preview_last_start = start
                 try:
                     self.inner.noutrefresh()
@@ -1160,8 +1194,9 @@ class _Pane:
                     idx = start + row
                     s = lines[idx] if idx < len(lines) else ""
                     s = pad_to_width(truncate_to_width(s, inner_w), inner_w)
-                    _safe_addstr(self.inner, row, 0, s, 0)
-                    self._inner_cache[row] = (s, 0)
+                    a = _attr_for_line(idx)
+                    _safe_addstr(self.inner, row, 0, s, a)
+                    self._inner_cache[row] = (s, a)
             else:
                 # View moved up: window content scrolled down; fill top lines.
                 d = -diff
@@ -1171,8 +1206,9 @@ class _Pane:
                     idx = start + row
                     s = lines[idx] if idx < len(lines) else ""
                     s = pad_to_width(truncate_to_width(s, inner_w), inner_w)
-                    _safe_addstr(self.inner, row, 0, s, 0)
-                    self._inner_cache[row] = (s, 0)
+                    a = _attr_for_line(idx)
+                    _safe_addstr(self.inner, row, 0, s, a)
+                    self._inner_cache[row] = (s, a)
 
             _apply_overlay(True)
             self._preview_last_start = start
@@ -1189,9 +1225,10 @@ class _Pane:
             idx = start + row
             s = lines[idx] if idx < len(lines) else ""
             s = pad_to_width(truncate_to_width(s, inner_w), inner_w)
-            if self._inner_cache[row] != (s, 0):
-                _safe_addstr(self.inner, row, 0, s, 0)
-                self._inner_cache[row] = (s, 0)
+            a = _attr_for_line(idx)
+            if self._inner_cache[row] != (s, a):
+                _safe_addstr(self.inner, row, 0, s, a)
+                self._inner_cache[row] = (s, a)
                 changed = True
         changed = _apply_overlay(changed)
         self._preview_last_start = start
@@ -1300,6 +1337,7 @@ def _preview_rows(
     message: Optional[str],
     *,
     scroll: int = 0,
+    line_attrs: Optional[Dict[int, int]] = None,
 ) -> List[Tuple[str, int]]:
     if rect.h < 3 or rect.w < 4:
         return []
@@ -1314,7 +1352,8 @@ def _preview_rows(
     for i in range(inner_h):
         src_i = start + i
         ln = lines[src_i] if src_i < len(lines) else ""
-        out.append((pad_to_width(truncate_to_width(ln, inner_w), inner_w), 0))
+        attr = int(line_attrs.get(src_i, 0) or 0) if line_attrs else 0
+        out.append((pad_to_width(truncate_to_width(ln, inner_w), inner_w), attr))
     return out
 
 
@@ -1442,7 +1481,12 @@ def select_chat(
     preview_lines_cached: List[str] = [""]
     ws_filter = ""
     chat_filter = ""
-    input_mode: Optional[str] = None  # "ws" | "chat"
+    input_mode: Optional[str] = None  # "ws" | "chat" | "preview"
+    preview_search = ""
+    preview_search_buf = ""
+    preview_matches: List[int] = []
+    preview_match_idx = 0
+    last_preview_search_key: object = object()
 
     bg = _BackgroundLoader(load_chats=load_chats, load_preview_snippet=load_preview_snippet, load_preview_full=load_preview_full)
 
@@ -1788,7 +1832,7 @@ def select_chat(
         if input_mode:
             status = "Type to search. Enter: apply  Esc: cancel"
         elif focus == "preview":
-            status = "↑/↓ PgUp/PgDn: scroll preview  Tab/Left/Right: switch  q: quit"
+            status = "↑/↓ PgUp/PgDn: scroll preview  /: search  n/N: next/prev  Enter: open  Tab/Left/Right: switch  q: quit"
         # Hint: save is available when a real chat with history is selected and we know the workspace path.
         if (
             toast is None
@@ -1840,6 +1884,18 @@ def select_chat(
         preview_overlay_active = bool(focus == "preview" and preview_loading_more)
         preview_view_h = max(0, preview_inner_h - (1 if preview_overlay_active else 0))
         preview_state.clamp(len(preview_lines), preview_view_h)
+
+        # Preview search: recompute matches when content/search changes (but not while editing).
+        search_key = (preview_search, preview_lines_key)
+        if input_mode != "preview" and search_key != last_preview_search_key:
+            preview_matches = _preview_find_matches(preview_lines, preview_search)
+            preview_match_idx = clamp(preview_match_idx, 0, max(0, len(preview_matches) - 1))
+            last_preview_search_key = search_key
+
+        preview_line_attrs: Dict[int, int] = {}
+        if focus == "preview" and preview_matches:
+            preview_match_idx = clamp(preview_match_idx, 0, max(0, len(preview_matches) - 1))
+            preview_line_attrs[preview_matches[preview_match_idx]] = curses.A_REVERSE
 
         # Draw panes with minimal updates.
         if layout.mode == "1col":
@@ -1904,7 +1960,8 @@ def select_chat(
 
         if renderer.preview_pane is None:
             continue
-        renderer.preview_pane.draw_frame("Preview", focused=(focus == "preview"), filter_text="", force=force_full)
+        prev_filter = preview_search_buf if input_mode == "preview" else preview_search
+        renderer.preview_pane.draw_frame("Preview", focused=(focus == "preview"), filter_text=prev_filter, force=force_full)
         if renderer.preview_pane.inner:
             bottom_overlay = None
             if focus == "preview" and preview_loading_more and preview_inner_h > 0 and preview_inner_w > 0:
@@ -1912,13 +1969,22 @@ def select_chat(
             renderer.preview_pane.draw_preview_lines(
                 preview_lines,
                 preview_state.scroll,
+                line_attrs=preview_line_attrs,
                 use_terminal_scroll=(layout.mode == "1col"),
                 bottom_overlay=bottom_overlay,
                 force=force_full,
             )
         else:
             renderer.preview_pane.draw_inner_rows(
-                _preview_rows(layout.preview, ws, selected_chat, msg, scroll=preview_state.scroll), force=force_full
+                _preview_rows(
+                    layout.preview,
+                    ws,
+                    selected_chat,
+                    msg,
+                    scroll=preview_state.scroll,
+                    line_attrs=preview_line_attrs,
+                ),
+                force=force_full,
             )
 
         if renderer.status is None:
@@ -1961,22 +2027,36 @@ def select_chat(
 
         if input_mode:
             if ch in (27,):  # ESC
+                if input_mode == "preview":
+                    preview_search_buf = preview_search
                 input_mode = None
                 continue
             if ch in (curses.KEY_ENTER, 10, 13):
+                if input_mode == "preview":
+                    preview_search = (preview_search_buf or "").strip()
+                    preview_search_buf = preview_search
+                    preview_matches = _preview_find_matches(preview_lines, preview_search)
+                    preview_match_idx = 0
+                    last_preview_search_key = (preview_search, preview_lines_key)
+                    if preview_matches and preview_view_h > 0:
+                        preview_state.scroll = _preview_scroll_to_match(preview_matches[0], view_h=preview_view_h)
                 input_mode = None
                 continue
             if ch in (curses.KEY_BACKSPACE, 127, 8):
                 if input_mode == "ws":
                     ws_filter = ws_filter[:-1]
-                else:
+                elif input_mode == "chat":
                     chat_filter = chat_filter[:-1]
+                else:
+                    preview_search_buf = preview_search_buf[:-1]
                 continue
             if 32 <= ch <= 126:
                 if input_mode == "ws":
                     ws_filter += chr(ch)
-                else:
+                elif input_mode == "chat":
                     chat_filter += chr(ch)
+                else:
+                    preview_search_buf += chr(ch)
                 continue
             continue
 
@@ -2076,8 +2156,11 @@ def select_chat(
             continue
 
         if ch in (ord("/"),):
-            base = last_list_focus if focus == "preview" else focus
-            input_mode = "ws" if base == "workspaces" else "chat"
+            if focus == "preview":
+                input_mode = "preview"
+                preview_search_buf = preview_search
+            else:
+                input_mode = "ws" if focus == "workspaces" else "chat"
             continue
 
         # Mouse support (best-effort)
@@ -2203,6 +2286,26 @@ def select_chat(
 
         # Preview keyboard scrolling
         if focus == "preview":
+            if ch in (curses.KEY_ENTER, 10, 13):
+                if ws is None:
+                    continue
+                if selected_chat is not None:
+                    return ws, selected_chat
+                if selected_is_new_agent:
+                    return ws, None
+                continue
+            if ch in (ord("n"),):
+                if preview_matches:
+                    preview_match_idx = (preview_match_idx + 1) % len(preview_matches)
+                    if preview_view_h > 0:
+                        preview_state.scroll = _preview_scroll_to_match(preview_matches[preview_match_idx], view_h=preview_view_h)
+                continue
+            if ch in (ord("N"),):
+                if preview_matches:
+                    preview_match_idx = (preview_match_idx - 1) % len(preview_matches)
+                    if preview_view_h > 0:
+                        preview_state.scroll = _preview_scroll_to_match(preview_matches[preview_match_idx], view_h=preview_view_h)
+                continue
             if ch in (curses.KEY_UP, ord("k")):
                 preview_state.move(-1, len(preview_lines), preview_view_h)
                 continue

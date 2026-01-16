@@ -108,7 +108,7 @@ class TestAgentPatching(unittest.TestCase):
             patched = js.read_text(encoding="utf-8")
             self.assertIn("CCM_PATCH_AVAILABLE_MODELS_NORMALIZED", patched)
             self.assertIn("availableModels", patched)
-            self.assertIn("supportsAgent === true", patched)
+            self.assertIn("supportsAgent === false", patched)
             self.assertIn("displayModelId", patched)
             self.assertIn("getUsableModels", patched)
 
@@ -140,7 +140,7 @@ class TestAgentPatching(unittest.TestCase):
             self.assertEqual(len(rep.patched_files), 1)
             new_txt = js.read_text(encoding="utf-8")
             self.assertIn("CCM_PATCH_AVAILABLE_MODELS_NORMALIZED", new_txt)
-            self.assertIn("supportsAgent === true", new_txt)
+            self.assertIn("supportsAgent === false", new_txt)
 
     def test_patch_upgrades_v2_marker(self) -> None:
         # V2 inserted a marker comment between functions; ensure our block matcher still upgrades.

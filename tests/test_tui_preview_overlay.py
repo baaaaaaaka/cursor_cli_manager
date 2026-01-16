@@ -117,6 +117,22 @@ class TestPreviewOverlayDrawing(unittest.TestCase):
         kinds = [op.kind for op in pane.inner.ops]
         self.assertNotIn("scroll", kinds)
 
+    def test_preview_draw_supports_line_highlighting(self) -> None:
+        stdscr = _FakeWindow(30, 120, name="stdscr")
+        rect = Rect(0, 0, 6, 20)  # inner is 4 rows
+        pane = _Pane(stdscr, rect)
+        assert pane.inner is not None
+
+        lines = ["aaa", "bbb", "ccc", "ddd"]
+        line_attrs = {1: curses.A_REVERSE}
+        pane.draw_preview_lines(lines, 0, use_terminal_scroll=False, line_attrs=line_attrs, force=True)
+
+        addstr = [op for op in pane.inner.ops if op.kind == "addstr"]
+        # Row 1 corresponds to lines[1] when start=0.
+        row1 = [op for op in addstr if op.y == 1]
+        self.assertTrue(row1, "expected row 1 to be drawn")
+        self.assertTrue(any((op.attr or 0) & curses.A_REVERSE for op in row1))
+
 
 if __name__ == "__main__":
     unittest.main()
