@@ -49,6 +49,10 @@ class TestInstallScript(unittest.TestCase):
             self.assertTrue(out.exists())
             self.assertTrue(out.stat().st_mode & stat.S_IXUSR)
             self.assertEqual(out.read_bytes(), b"fake-binary\n")
+            alias = dest_dir / "cursor-cli-manager"
+            self.assertTrue(alias.exists())
+            self.assertTrue(alias.is_symlink())
+            self.assertEqual(alias.resolve(), out.resolve())
 
     def test_install_script_fails_on_checksum_mismatch(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -62,6 +66,7 @@ class TestInstallScript(unittest.TestCase):
             self.assertNotEqual(p.returncode, 0)
             self.assertIn("Checksum mismatch", p.stderr)
             self.assertFalse((dest_dir / "ccm").exists())
+            self.assertFalse((dest_dir / "cursor-cli-manager").exists())
 
 
 if __name__ == "__main__":

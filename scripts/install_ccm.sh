@@ -114,6 +114,14 @@ DEST="${DEST_DIR%/}/ccm"
 # Atomic-ish replace (POSIX mv is atomic within same filesystem).
 mv -f "${TMP_BIN}" "${DEST}"
 
+# Provide the pip-style alias too (best-effort).
+ALIAS="${DEST_DIR%/}/cursor-cli-manager"
+(
+  cd "${DEST_DIR%/}" || exit 0
+  ln -sf "ccm" "$(basename "${ALIAS}")" 2>/dev/null || true
+)
+
 printf '%s\n' "Installed ${ASSET} -> ${DEST}"
+printf '%s\n' "Alias: ${ALIAS} -> ${DEST}"
 printf '%s\n' "Tip: ensure ${DEST_DIR} is on your PATH."
 
