@@ -128,6 +128,13 @@ def cmd_doctor(agent_dirs: CursorAgentDirs) -> int:
     return 0
 
 
+def cmd_upgrade(*, python: str) -> int:
+    ok, out = perform_update(python=python)
+    if out:
+        print(out)
+    return 0 if ok else 1
+
+
 def cmd_open(
     agent_dirs: CursorAgentDirs,
     chat_id: str,
@@ -360,6 +367,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_patch = sub.add_parser("patch-models", help="Patch cursor-agent bundles to prefer AvailableModels.")
     p_patch.add_argument("--dry-run", action="store_true", help="Scan and report without writing.")
 
+    sub.add_parser("upgrade", help="Upgrade ccm (VCS pip install or GitHub-release binary).")
+
     args = parser.parse_args(argv)
 
     if args.config_dir:
@@ -410,6 +419,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             for p, e in rep.errors[:10]:
                 print(f"- {p}: {e}")
         return 0 if rep.ok else 1
+    if cmd == "upgrade":
+        return cmd_upgrade(python=sys.executable)
 
     parser.print_help()
     return 2

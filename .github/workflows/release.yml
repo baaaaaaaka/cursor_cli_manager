@@ -1,0 +1,116 @@
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-x86_64-glibc217:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build linux binary (manylinux2014)
+        run: |
+          set -euxo pipefail
+          mkdir -p out
+          docker pull quay.io/pypa/manylinux2014_x86_64:latest
+          docker run --rm \
+            -v "${GITHUB_WORKSPACE}:/work" \
+            -w /work \
+            quay.io/pypa/manylinux2014_x86_64:latest \
+            /bin/bash -lc '
+              set -euxo pipefail
+              PY=/opt/python/cp311-cp311/bin/python
+              $PY -m pip install -U pip "setuptools<69" wheel pyinstaller
+              $PY -m pip install -e .
+              $PY -m PyInstaller --clean -F -n ccm cursor_cli_manager/__main__.py
+              cp dist/ccm out/ccm-linux-x86_64-glibc217
+              chmod 755 out/ccm-linux-x86_64-glibc217
+            '
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ccm-linux-x86_64-glibc217
+          path: out/ccm-linux-x86_64-glibc217
+
+  build-macos-x86_64:
+    runs-on: macos-13
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build macOS x86_64 binary
+        run: |
+          set -euxo pipefail
+          python -m pip install -U pip "setuptools<69" wheel pyinstaller
+          python -m pip install -e .
+          python -m PyInstaller --clean -F -n ccm cursor_cli_manager/__main__.py
+          mkdir -p out
+          cp dist/ccm out/ccm-macos-x86_64
+          chmod 755 out/ccm-macos-x86_64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ccm-macos-x86_64
+          path: out/ccm-macos-x86_64
+
+  build-macos-arm64:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build macOS arm64 binary
+        run: |
+          set -euxo pipefail
+          python -m pip install -U pip "setuptools<69" wheel pyinstaller
+          python -m pip install -e .
+          python -m PyInstaller --clean -F -n ccm cursor_cli_manager/__main__.py
+          mkdir -p out
+          cp dist/ccm out/ccm-macos-arm64
+          chmod 755 out/ccm-macos-arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ccm-macos-arm64
+          path: out/ccm-macos-arm64
+
+  publish:
+    runs-on: ubuntu-latest
+    needs:
+      - build-linux-x86_64-glibc217
+      - build-macos-x86_64
+      - build-macos-arm64
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Prepare checksums.txt
+        run: |
+          set -euxo pipefail
+          sha256sum dist/ccm-* > dist/checksums.txt
+          ls -la dist
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/ccm-*
+            dist/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

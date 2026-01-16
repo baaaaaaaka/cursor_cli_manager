@@ -16,10 +16,32 @@ This project targets **macOS** and **Linux**.
 
 ## Install
 
-After installing, you will get two command names:
+### One-line install (GitHub Releases binary)
 
-- `ccm`
-- `cursor-cli-manager`
+```bash
+curl -fsSL https://raw.githubusercontent.com/baaaaaaaka/cursor_cli_manager/main/scripts/install_ccm.sh | sh
+```
+
+This will:
+
+- Detect your OS/arch and download the matching `ccm` binary from GitHub Releases
+- Install it into `~/.local/bin/ccm` (creates the directory if needed)
+
+Tip: for stability/security, pin the installer to a tag (or commit SHA):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/baaaaaaaka/cursor_cli_manager/v0.5.6/scripts/install_ccm.sh | sh
+```
+
+Notes:
+
+- You can override the GitHub repo via `CCM_GITHUB_REPO=owner/name`
+- Choose install dir via `CCM_INSTALL_DEST=/some/dir`
+
+After installing:
+
+- If installed via **binary**, you will have `ccm`
+- If installed via **pip**, you will have `ccm` and `cursor-cli-manager`
 
 ### From Git (recommended)
 
@@ -67,7 +89,7 @@ python3 -m cursor_cli_manager
   - Select **`(New Agent)`** at the top of a workspace to start a brand-new terminal chat in that folder
 - **Quit**: `q`
 - **Preview scroll** (when Preview pane is focused): Up/Down, PageUp/PageDown (mouse wheel best-effort)
-- **In-app update**: `Ctrl+U` (only works for **pip VCS installs with PEP 610** metadata; see below)
+- **In-app update**: `Ctrl+U` (works for **GitHub-release binaries** and **pip VCS installs with PEP 610** metadata)
 - **Mouse**: click to select (wheel support is best-effort and may be unavailable on some `curses` builds)
 
 The bottom-right corner shows version/update info:
@@ -85,6 +107,7 @@ The bottom-right corner shows version/update info:
 - `ccm doctor`: print diagnostics about detected `cursor-agent` storage + CLI
 - `ccm open <chatId> --workspace <path>`: resume a chat session in the terminal
   - `--dry-run`: print command instead of executing
+- `ccm upgrade`: upgrade in-place (GitHub-release binary or PEP 610 VCS install)
 
 Note: global flags must come before the subcommand:
 
@@ -104,6 +127,7 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 - `CURSOR_AGENT_CONFIG_DIR`: override the config dir (default: `~/.cursor`)
 - `--config-dir <dir>`: override the config dir (same effect as `CURSOR_AGENT_CONFIG_DIR`)
 - `CCM_PATCH_CURSOR_AGENT_MODELS=1`: patch cursor-agent bundles before launching so `/model` / `--list-models` prefer "AvailableModels" (best-effort)
+- `CCM_GITHUB_REPO=owner/name`: override the GitHub repo used by `ccm upgrade` for GitHub-release binaries
 - `CCM_CURSOR_AGENT_VERSIONS_DIR`: override the cursor-agent `versions/` directory (used for model patching)
 - `CURSOR_AGENT_VERSIONS_DIR`: same as above (fallback)
 

@@ -4,9 +4,21 @@ import json
 import os
 import signal
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
+
+from cursor_cli_manager import __version__
+from cursor_cli_manager.github_release import (
+    Fetch,
+    download_and_install_release_binary,
+    fetch_latest_release,
+    get_github_repo,
+    is_frozen_binary,
+    is_version_newer,
+    select_release_asset_name,
+)
 
 
 DIST_INFO_GLOB = "cursor_cli_manager-*.dist-info"
@@ -15,11 +27,15 @@ DIST_INFO_GLOB = "cursor_cli_manager-*.dist-info"
 @dataclass(frozen=True)
 class UpdateStatus:
     supported: bool
-    method: Optional[str] = None  # "pep610"
+    method: Optional[str] = None  # "pep610" | "github_release"
     url: Optional[str] = None
     requested_revision: Optional[str] = None
     installed_commit: Optional[str] = None
     remote_commit: Optional[str] = None
+    installed_version: Optional[str] = None
+    remote_version: Optional[str] = None
+    repo: Optional[str] = None
+    asset_name: Optional[str] = None
     update_available: bool = False
     error: Optional[str] = None
 
@@ -187,13 +203,54 @@ def check_for_update(
     package_dir: Optional[Path] = None,
     timeout_s: float = 2.0,
     run: Runner = _default_runner,
+    fetch: Optional[Fetch] = None,
 ) -> UpdateStatus:
     """
-    Best-effort, non-blocking-friendly update check for PEP 610 VCS installs.
+    Best-effort, non-blocking-friendly update check.
 
-    We compare the installed commit_id (recorded by pip) against the remote tip
-    of the requested revision.
+    Methods:
+    - Frozen binary: compare current version against GitHub latest release tag.
+    - PEP 610 VCS install: compare installed commit_id against remote tip of requested revision.
     """
+    if is_frozen_binary():
+        repo = get_github_repo()
+        try:
+            if fetch is None:
+                rel = fetch_latest_release(repo, timeout_s=timeout_s)
+            else:
+                rel = fetch_latest_release(repo, timeout_s=timeout_s, fetch=fetch)
+        except Exception as e:
+            return UpdateStatus(
+                supported=False,
+                method="github_release",
+                repo=repo,
+                installed_version=__version__,
+                error=str(e),
+            )
+        try:
+            asset_name = select_release_asset_name()
+        except Exception as e:
+            return UpdateStatus(
+                supported=False,
+                method="github_release",
+                repo=repo,
+                installed_version=__version__,
+                remote_version=rel.version,
+                error=str(e),
+            )
+
+        newer = is_version_newer(rel.version, __version__)
+        return UpdateStatus(
+            supported=(newer is not None),
+            method="github_release",
+            repo=repo,
+            installed_version=__version__,
+            remote_version=rel.version,
+            asset_name=asset_name,
+            update_available=bool(newer),
+            error=None if newer is not None else "failed to parse version",
+        )
+
     info = read_pep610_install_info(package_dir=package_dir)
     if info is None:
         return UpdateStatus(supported=False, error="not a PEP 610 VCS install")
@@ -239,13 +296,50 @@ def perform_update(
     python: str = "python",
     timeout_s: float = 120.0,
     run: Runner = _default_runner,
+    fetch: Optional[Fetch] = None,
 ) -> Tuple[bool, str]:
     """
-    Perform an in-place upgrade for PEP 610 VCS installs using pip.
+    Perform an in-place upgrade.
+
+    Methods:
+    - Frozen binary: download latest GitHub release asset and replace current executable.
+    - PEP 610 VCS install: use pip to upgrade from the recorded VCS URL.
 
     Returns (ok, combined_output). If this isn't a PEP 610 VCS install, returns
     (False, reason).
     """
+    if is_frozen_binary():
+        repo = get_github_repo()
+        try:
+            if fetch is None:
+                rel = fetch_latest_release(repo, timeout_s=timeout_s)
+            else:
+                rel = fetch_latest_release(repo, timeout_s=timeout_s, fetch=fetch)
+            asset_name = select_release_asset_name()
+            dest = Path(sys.executable).resolve()
+            if fetch is None:
+                download_and_install_release_binary(
+                    repo=repo,
+                    tag=rel.tag,
+                    asset_name=asset_name,
+                    dest_path=dest,
+                    timeout_s=timeout_s,
+                    verify_checksums=True,
+                )
+            else:
+                download_and_install_release_binary(
+                    repo=repo,
+                    tag=rel.tag,
+                    asset_name=asset_name,
+                    dest_path=dest,
+                    timeout_s=timeout_s,
+                    fetch=fetch,
+                    verify_checksums=True,
+                )
+            return True, f"updated to {rel.version}"
+        except Exception as e:
+            return False, str(e)
+
     info = read_pep610_install_info(package_dir=package_dir)
     if info is None:
         return False, "not a PEP 610 VCS install"
