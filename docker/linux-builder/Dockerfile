@@ -53,5 +53,5 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK="1"
 
 # Install build tooling once (release jobs won't hit PyPI).
 RUN set -euxo pipefail; \
-    python3 -m pip install -U pip "setuptools<69" wheel pyinstaller
+    python3 -m pip install -U pip "setuptools<69" wheel pyinstaller certifi
 

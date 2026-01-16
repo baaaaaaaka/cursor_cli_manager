@@ -30,6 +30,7 @@ class TestReleaseAssetsConsistency(unittest.TestCase):
         self.assertIn("ccm-linux-x86_64-glibc217.tar.gz", txt)
         self.assertIn("--add-data", txt)
         self.assertIn("/opt/terminfo:terminfo", txt)
+        self.assertIn("--collect-data certifi", txt)
         self.assertIn("tar -C", txt)
 
 

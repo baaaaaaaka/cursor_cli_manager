@@ -37,7 +37,7 @@ docker run --rm \
   /bin/bash -lc "
     set -euxo pipefail
     cd /work
-    python3 -m PyInstaller --clean -n ccm --add-data \"/opt/terminfo:terminfo\" --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
+    python3 -m PyInstaller --clean -n ccm --add-data \"/opt/terminfo:terminfo\" --collect-data certifi --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
     # Package the onedir output as a tarball for release distribution.
     tar -C out/_dist -czf out/${ASSET_NAME} ccm
   "

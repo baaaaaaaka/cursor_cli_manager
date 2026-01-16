@@ -46,8 +46,8 @@ jobs:
       - name: Build macOS x86_64 binary
         run: |
           set -euxo pipefail
-          python -m pip install -U pip "setuptools<69" wheel pyinstaller
-          python -m PyInstaller --clean -n ccm --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
+          python -m pip install -U pip "setuptools<69" wheel pyinstaller certifi
+          python -m PyInstaller --clean -n ccm --collect-data certifi --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
           tar -C out/_dist -czf out/ccm-macos-x86_64.tar.gz ccm
 
       - uses: actions/upload-artifact@v4
@@ -66,8 +66,8 @@ jobs:
       - name: Build macOS arm64 binary
         run: |
           set -euxo pipefail
-          python -m pip install -U pip "setuptools<69" wheel pyinstaller
-          python -m PyInstaller --clean -n ccm --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
+          python -m pip install -U pip "setuptools<69" wheel pyinstaller certifi
+          python -m PyInstaller --clean -n ccm --collect-data certifi --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
           tar -C out/_dist -czf out/ccm-macos-arm64.tar.gz ccm
 
       - uses: actions/upload-artifact@v4

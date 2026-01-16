@@ -9,12 +9,14 @@ import stat
 import sys
 import tarfile
 import tempfile
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple
 
 import shutil
+import ssl
 
 
 ENV_CCM_GITHUB_REPO = "CCM_GITHUB_REPO"  # e.g. "baaaaaaaka/cursor_cli_manager"
@@ -26,10 +28,73 @@ ENV_CCM_INSTALL_ROOT = "CCM_INSTALL_ROOT"
 Fetch = Callable[[str, float, Dict[str, str]], bytes]
 
 
+def _looks_like_cert_verify_error(err: BaseException) -> bool:
+    # urllib wraps SSL errors in URLError(reason=...).
+    if isinstance(err, ssl.SSLCertVerificationError):
+        return True
+    if isinstance(err, ssl.SSLError) and "CERTIFICATE_VERIFY_FAILED" in str(err):
+        return True
+    if isinstance(err, urllib.error.URLError):
+        r = err.reason
+        if isinstance(r, BaseException):
+            return _looks_like_cert_verify_error(r)
+        return "CERTIFICATE_VERIFY_FAILED" in str(r)
+    return "CERTIFICATE_VERIFY_FAILED" in str(err)
+
+
+def _bundled_cafile() -> Optional[str]:
+    """
+    Best-effort CA bundle path for frozen binaries.
+
+    We intentionally do NOT override user-provided SSL_CERT_FILE/SSL_CERT_DIR.
+    """
+    if not is_frozen_binary():
+        return None
+    if os.environ.get("SSL_CERT_FILE") or os.environ.get("SSL_CERT_DIR"):
+        return None
+    # Prefer certifi when present (PyInstaller hook bundles its cacert.pem).
+    try:
+        import certifi  # type: ignore[import-not-found]
+
+        p = certifi.where()
+        if isinstance(p, str) and p:
+            pp = Path(p)
+            if pp.exists():
+                return str(pp)
+    except Exception:
+        pass
+    # Fallback: look for a top-level cacert.pem in common PyInstaller layouts.
+    try:
+        mp = getattr(sys, "_MEIPASS", None)
+        if isinstance(mp, str) and mp:
+            cand = Path(mp) / "cacert.pem"
+            if cand.exists():
+                return str(cand)
+    except Exception:
+        pass
+    try:
+        cand2 = Path(sys.executable).resolve().parent / "cacert.pem"
+        if cand2.exists():
+            return str(cand2)
+    except Exception:
+        pass
+    return None
+
+
 def _default_fetch(url: str, timeout_s: float, headers: Dict[str, str]) -> bytes:
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-        return resp.read()
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            return resp.read()
+    except Exception as e:
+        cafile = _bundled_cafile()
+        if not cafile:
+            raise
+        if not _looks_like_cert_verify_error(e):
+            raise
+        ctx = ssl.create_default_context(cafile=cafile)
+        with urllib.request.urlopen(req, timeout=timeout_s, context=ctx) as resp:
+            return resp.read()
 
 
 def _http_headers() -> Dict[str, str]:
