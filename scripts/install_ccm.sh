@@ -15,6 +15,7 @@ REPO="${CCM_GITHUB_REPO:-baaaaaaaka/cursor_cli_manager}"
 TAG="${CCM_INSTALL_TAG:-latest}"
 DEST_DIR="${CCM_INSTALL_DEST:-${HOME}/.local/bin}"
 ROOT_DIR="${CCM_INSTALL_ROOT:-${HOME}/.local/lib/ccm}"
+ASSET_URL_EFFECTIVE=""
 
 OS="${CCM_INSTALL_OS:-$(uname -s)}"
 ARCH="${CCM_INSTALL_ARCH:-$(uname -m)}"
@@ -96,6 +97,13 @@ resolve_tag() {
   api="https://api.github.com/repos/${REPO}/releases/latest"
   txt="$(fetch_text "${api}" 2>/dev/null || true)"
   if [ -z "${txt}" ]; then
+    if [ -n "${ASSET_URL_EFFECTIVE:-}" ]; then
+      tag="$(printf '%s' "${ASSET_URL_EFFECTIVE}" | sed -n 's#.*/releases/download/\\([^/]*\\)/.*#\\1#p' | head -n 1)"
+      if [ -n "${tag}" ]; then
+        printf '%s' "${tag}"
+        return 0
+      fi
+    fi
     printf '%s' "latest"
     return 0
   fi
@@ -104,6 +112,13 @@ resolve_tag() {
   if [ -n "${tag}" ]; then
     printf '%s' "${tag}"
   else
+    if [ -n "${ASSET_URL_EFFECTIVE:-}" ]; then
+      tag2="$(printf '%s' "${ASSET_URL_EFFECTIVE}" | sed -n 's#.*/releases/download/\\([^/]*\\)/.*#\\1#p' | head -n 1)"
+      if [ -n "${tag2}" ]; then
+        printf '%s' "${tag2}"
+        return 0
+      fi
+    fi
     printf '%s' "latest"
   fi
 }
@@ -118,7 +133,12 @@ if [ -n "${CCM_INSTALL_FROM_DIR:-}" ]; then
 else
   if [ "${TAG}" = "latest" ]; then
     BASE="https://github.com/${REPO}/releases/latest/download"
-    fetch_to "${BASE}/${ASSET}" "${TMP_BIN}"
+    if command -v curl >/dev/null 2>&1; then
+      # Capture the final URL after redirects so we can infer the real tag without the GitHub API.
+      ASSET_URL_EFFECTIVE="$(curl -fsSL -o "${TMP_BIN}" -w "%{url_effective}" "${BASE}/${ASSET}")"
+    else
+      fetch_to "${BASE}/${ASSET}" "${TMP_BIN}"
+    fi
     # checksums are optional
     if fetch_to "${BASE}/checksums.txt" "${TMP_SUM}" 2>/dev/null; then
       :
@@ -155,6 +175,10 @@ fi
 
 TAG_RESOLVED="$(resolve_tag)"
 VERSIONS_DIR="${ROOT_DIR%/}/versions"
+if [ "${TAG_RESOLVED}" = "latest" ] && [ -z "${CCM_INSTALL_FROM_DIR:-}" ]; then
+  # Avoid reusing a potentially broken "versions/latest" directory.
+  TAG_RESOLVED="latest-$(date +%s)"
+fi
 FINAL_DIR="${VERSIONS_DIR%/}/${TAG_RESOLVED}"
 CURRENT_LINK="${ROOT_DIR%/}/current"
 
@@ -175,6 +199,10 @@ chmod 755 "${TMP_DIR%/}/ccm/ccm" 2>/dev/null || true
 
 # Replace version dir (best-effort).
 rm -rf "${FINAL_DIR}" 2>/dev/null || true
+if [ -e "${FINAL_DIR}" ]; then
+  # If we couldn't remove it, avoid nesting inside it.
+  FINAL_DIR="${FINAL_DIR}.$(date +%s)"
+fi
 mv "${TMP_DIR}" "${FINAL_DIR}"
 TMP_DIR=""
 
@@ -195,6 +223,12 @@ ALIAS="${DEST_DIR%/}/cursor-cli-manager"
   cd "${DEST_DIR%/}" || exit 0
   ln -sf "ccm" "$(basename "${ALIAS}")" 2>/dev/null || true
 )
+
+if [ ! -f "${TARGET}" ] || [ ! -x "${TARGET}" ]; then
+  printf '%s\n' "Install failed: ${TARGET} is not a runnable executable." 1>&2
+  printf '%s\n' "Tip: remove ${ROOT_DIR%/} and re-run the installer." 1>&2
+  exit 7
+fi
 
 printf '%s\n' "Installed ${ASSET} -> ${DEST}"
 printf '%s\n' "Alias: ${ALIAS} -> ${DEST}"

@@ -12,6 +12,8 @@ class TestReleaseAssetsConsistency(unittest.TestCase):
             "ccm-macos-arm64.tar.gz",
         ):
             self.assertIn(name, txt)
+        # Ensure the installer can infer the effective tag from the download redirect.
+        self.assertIn("url_effective", txt)
 
     def test_release_workflow_mentions_expected_asset_names(self) -> None:
         root = Path(__file__).resolve().parent.parent
