@@ -88,7 +88,9 @@ class TestAgentPatching(unittest.TestCase):
             (v / "8658.index.js").write_text(SAMPLE_JS, encoding="utf-8")
 
             inferred = resolve_cursor_agent_versions_dir(cursor_agent_path=str(v / "cursor-agent"))
-            self.assertEqual(inferred, versions_dir)
+            self.assertIsNotNone(inferred)
+            # macOS commonly exposes /var as a symlink to /private/var; normalize via resolve().
+            self.assertEqual(inferred.resolve(), versions_dir.resolve())
 
     def test_patch_cursor_agent_models_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as td:
