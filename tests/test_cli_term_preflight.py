@@ -38,11 +38,13 @@ class TestCliTermPreflight(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             dist = Path(td)
             (dist / "terminfo").mkdir(parents=True, exist_ok=True)
-            bundled = str(dist / "terminfo")
+            bundled_p = (dist / "terminfo").resolve()
+            bundled = str(bundled_p)
 
             def fake_setupterm(*_args, **kwargs):
                 term = kwargs.get("term")
-                if os.environ.get("TERMINFO") == bundled and term == "xterm":
+                ti = os.environ.get("TERMINFO") or ""
+                if (Path(ti).resolve() if ti else None) == bundled_p and term == "xterm":
                     return None
                 raise curses.error("setupterm: could not find terminal")
 
@@ -54,7 +56,7 @@ class TestCliTermPreflight(unittest.TestCase):
                 "cursor_cli_manager.cli.curses.setupterm", side_effect=fake_setupterm
             ):
                 _prepare_curses_term_for_tui()
-                self.assertEqual(os.environ.get("TERMINFO"), bundled)
+                self.assertEqual(Path(os.environ.get("TERMINFO") or "").resolve(), bundled_p)
                 self.assertEqual(os.environ.get("TERM"), "xterm")
 
     def test_prepare_curses_term_does_not_override_user_terminfo(self) -> None:
