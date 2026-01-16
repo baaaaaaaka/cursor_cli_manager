@@ -377,11 +377,32 @@ def cmd_tui(
             if ok:
                 # Restart the current command so the updated code is loaded.
                 argv = sys.argv[:] or ["ccm"]
+                restart_errors: List[BaseException] = []
                 try:
                     os.execvp(argv[0], argv)
-                except Exception:
-                    # Fallback: run via python -m for editable/dev installs.
-                    os.execv(sys.executable, [sys.executable, "-m", "cursor_cli_manager"] + argv[1:])
+                except BaseException as e:
+                    restart_errors.append(e)
+
+                # Fallback: run via python -m for editable/dev installs only.
+                if not getattr(sys, "frozen", False):
+                    try:
+                        os.execv(sys.executable, [sys.executable, "-m", "cursor_cli_manager"] + argv[1:])
+                    except BaseException as e:
+                        restart_errors.append(e)
+
+                # If we couldn't restart, don't crash. Tell the user to restart manually.
+                print("Upgrade installed, but failed to restart automatically.", file=sys.stderr)
+                if restart_errors:
+                    last = restart_errors[-1]
+                    try:
+                        eno = getattr(last, "errno", None)
+                    except Exception:
+                        eno = None
+                    if eno == 40 or "Too many levels of symbolic links" in str(last):
+                        print("It looks like your `ccm` symlink is broken (symbolic link loop).", file=sys.stderr)
+                        print("Fix: re-run the installer or remove the broken symlink and reinstall.", file=sys.stderr)
+                print("Please re-run `ccm` manually.", file=sys.stderr)
+                return 0
             # Pull failed; return to TUI.
             continue
 

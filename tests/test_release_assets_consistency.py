@@ -23,6 +23,9 @@ class TestReleaseAssetsConsistency(unittest.TestCase):
             "checksums.txt",
         ):
             self.assertIn(name, txt)
+        # CA bundle must be included in binary releases for SSL fallback.
+        self.assertIn("certifi", txt)
+        self.assertIn("--collect-data certifi", txt)
 
     def test_linux_build_script_mentions_asset_and_terminfo(self) -> None:
         root = Path(__file__).resolve().parent.parent
@@ -32,6 +35,11 @@ class TestReleaseAssetsConsistency(unittest.TestCase):
         self.assertIn("/opt/terminfo:terminfo", txt)
         self.assertIn("--collect-data certifi", txt)
         self.assertIn("tar -C", txt)
+
+    def test_linux_builder_installs_certifi(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        txt = (root / "docker" / "linux-builder" / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("certifi", txt)
 
 
 if __name__ == "__main__":

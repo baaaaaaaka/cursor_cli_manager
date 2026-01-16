@@ -13,6 +13,8 @@ import shutil
 
 from cursor_cli_manager import __version__
 from cursor_cli_manager.github_release import (
+    ENV_CCM_INSTALL_DEST,
+    ENV_CCM_INSTALL_ROOT,
     Fetch,
     download_and_install_release_bundle,
     fetch_latest_release,
@@ -324,23 +326,34 @@ def perform_update(
             # Determine install dirs (env override > infer from PATH/executable > defaults).
             bin_dir = get_install_bin_dir()
             root_dir = get_install_root_dir()
-            try:
-                which = shutil.which("ccm")
-                if which:
-                    bin_dir = Path(which).expanduser().resolve().parent
-            except Exception:
-                pass
-            try:
-                # Only infer from sys.executable if it matches our onedir layout:
-                #   <root>/versions/<tag>/ccm/ccm  OR  <root>/current/ccm/ccm
-                exe = Path(sys.executable).resolve()
-                if exe.name == "ccm" and exe.parent.name == "ccm":
-                    if exe.parent.parent.name == "current":
-                        root_dir = exe.parent.parent.parent
-                    elif exe.parent.parent.parent.name == "versions":
-                        root_dir = exe.parent.parent.parent.parent
-            except Exception:
-                pass
+            # Respect explicit overrides (do not "auto-detect" over them).
+            env_dest = os.environ.get(ENV_CCM_INSTALL_DEST)
+            env_root = os.environ.get(ENV_CCM_INSTALL_ROOT)
+
+            if not (isinstance(env_dest, str) and env_dest.strip()):
+                try:
+                    which = shutil.which("ccm")
+                    if which:
+                        # IMPORTANT: do NOT resolve here. If "ccm" is a symlink into the
+                        # onedir bundle, resolve() would move bin_dir into the bundle and
+                        # we could overwrite the running executable (potentially creating
+                        # a symlink loop).
+                        bin_dir = Path(which).expanduser().parent
+                except Exception:
+                    pass
+
+            if not (isinstance(env_root, str) and env_root.strip()):
+                try:
+                    # Only infer from sys.executable if it matches our onedir layout:
+                    #   <root>/versions/<tag>/ccm/ccm  OR  <root>/current/ccm/ccm
+                    exe = Path(sys.executable).resolve()
+                    if exe.name == "ccm" and exe.parent.name == "ccm":
+                        if exe.parent.parent.name == "current":
+                            root_dir = exe.parent.parent.parent
+                        elif exe.parent.parent.parent.name == "versions":
+                            root_dir = exe.parent.parent.parent.parent
+                except Exception:
+                    pass
 
             if fetch is None:
                 download_and_install_release_bundle(
