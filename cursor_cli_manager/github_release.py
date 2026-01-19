@@ -483,6 +483,19 @@ def _resolve_for_compare(p: Path) -> Path:
             return p
 
 
+def _abspath_for_compare(p: Path) -> Path:
+    """
+    Return a normalized absolute path without resolving symlinks.
+    """
+    try:
+        return p.expanduser().absolute()
+    except Exception:
+        try:
+            return p.absolute()
+        except Exception:
+            return p
+
+
 def _is_within(child: Path, parent: Path) -> bool:
     """
     Return True if `child` is equal to or under `parent`, comparing best-effort resolved paths.
@@ -513,7 +526,7 @@ def _atomic_symlink(target: Path, link: Path) -> None:
     except Exception:
         pass
     # Prevent creating self-referential symlinks (can lead to ELOOP).
-    if _resolve_for_compare(target) == _resolve_for_compare(link):
+    if _abspath_for_compare(target) == _abspath_for_compare(link):
         raise RuntimeError(f"refusing to create self-referential symlink: {link} -> {target}")
     link.parent.mkdir(parents=True, exist_ok=True)
     tmp = link.with_name(f".{link.name}.{os.getpid()}.tmp")

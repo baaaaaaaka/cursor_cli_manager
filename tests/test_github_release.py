@@ -83,6 +83,23 @@ class TestGithubReleaseHelpers(unittest.TestCase):
             self.assertTrue(link.is_symlink())
             self.assertEqual(link.resolve(), target.resolve())
 
+    def test_atomic_symlink_ignores_self_reference_for_existing_link(self) -> None:
+        """
+        If an existing symlink already resolves to the target, we must not
+        treat it as a self-referential link even when readlink fails.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            target = base / "target"
+            target.write_text("x", encoding="utf-8")
+            link = base / "link"
+            link.symlink_to(target)
+
+            with patch("cursor_cli_manager.github_release.os.readlink", side_effect=OSError("boom")):
+                _atomic_symlink(target, link)
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.resolve(), target.resolve())
+
     def test_atomic_symlink_refuses_self_reference(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
