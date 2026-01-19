@@ -50,6 +50,7 @@ docker run --rm \
     set -euxo pipefail
     cd /work
     python3 -m PyInstaller --clean -n ccm --add-data \"${TERMINFO_DIR}:terminfo\" --collect-data certifi --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
+    python3 -c 'from pathlib import Path; import sys; p=Path(\"out/_dist/ccm/_internal/python3.11/lib-dynload\"); m=list(p.glob(\"_curses*.so\")); sys.exit(0 if m else (sys.stderr.write(\"missing _curses in bundle\\n\") or 1))'
     # Package the onedir output as a tarball for release distribution.
     tar -C out/_dist -czf out/${ASSET_NAME} ccm
   "

@@ -47,12 +47,14 @@ RUN set -euxo pipefail; \
     tar -xf "Python-${PYVER}.tgz"; \
     cd "Python-${PYVER}"; \
     export CPPFLAGS="-I/opt/openssl/include -I/opt/ncurses6/include"; \
+    export CFLAGS="-I/opt/openssl/include -I/opt/ncurses6/include"; \
     export LDFLAGS="-L/opt/openssl/lib -L/opt/ncurses6/lib"; \
     export LD_LIBRARY_PATH="/opt/openssl/lib:/opt/ncurses6/lib"; \
     export PKG_CONFIG_PATH="/opt/ncurses6/lib/pkgconfig"; \
     ./configure --prefix=/opt/python --enable-shared --with-openssl=/opt/openssl --with-openssl-rpath=no --with-ensurepip=install; \
     make -j"$(nproc)"; \
     make install; \
+    LD_LIBRARY_PATH="/opt/python/lib:/opt/openssl/lib:/opt/ncurses6/lib" /opt/python/bin/python3 -c "import _curses; print(_curses.__file__)"; \
     rm -rf "/tmp/Python-${PYVER}" "/tmp/Python-${PYVER}.tgz"
 
 # Prepare a minimal bundled terminfo database for common TERM values.
