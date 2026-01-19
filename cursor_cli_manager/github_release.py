@@ -498,6 +498,20 @@ def _atomic_symlink(target: Path, link: Path) -> None:
     """
     Atomically replace link with a symlink to target (best-effort).
     """
+    # If the link already points to the target, do nothing.
+    try:
+        if link.is_symlink():
+            try:
+                raw = os.readlink(link)
+                link_target = Path(raw)
+                if not link_target.is_absolute():
+                    link_target = link.parent / link_target
+                if _resolve_for_compare(link_target) == _resolve_for_compare(target):
+                    return
+            except Exception:
+                pass
+    except Exception:
+        pass
     # Prevent creating self-referential symlinks (can lead to ELOOP).
     if _resolve_for_compare(target) == _resolve_for_compare(link):
         raise RuntimeError(f"refusing to create self-referential symlink: {link} -> {target}")

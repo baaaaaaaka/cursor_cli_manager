@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from cursor_cli_manager.github_release import (
+    _atomic_symlink,
     LINUX_ASSET_COMMON,
     LINUX_ASSET_NC5,
     LINUX_ASSET_NC6,
@@ -69,6 +70,25 @@ class TestGithubReleaseHelpers(unittest.TestCase):
                 select_release_asset_name(system="Linux", machine="x86_64", linux_variant="common"),
                 LINUX_ASSET_COMMON,
             )
+
+    def test_atomic_symlink_noop_when_already_target(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            target = base / "target"
+            target.write_text("x", encoding="utf-8")
+            link = base / "link"
+            link.symlink_to(target)
+
+            _atomic_symlink(target, link)
+            self.assertTrue(link.is_symlink())
+            self.assertEqual(link.resolve(), target.resolve())
+
+    def test_atomic_symlink_refuses_self_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            link = base / "link"
+            with self.assertRaises(RuntimeError):
+                _atomic_symlink(link, link)
 
     def test_select_release_asset_name_macos(self) -> None:
         self.assertEqual(select_release_asset_name(system="Darwin", machine="x86_64"), "ccm-macos-x86_64.tar.gz")
