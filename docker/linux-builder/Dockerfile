@@ -33,6 +33,7 @@ RUN set -euxo pipefail; \
     ./configure --prefix=/opt/python --enable-shared --with-openssl=/opt/openssl --with-openssl-rpath=no --with-ensurepip=install; \
     make -j"$(nproc)"; \
     make install; \
+    LD_LIBRARY_PATH="/opt/python/lib:/opt/openssl/lib" /opt/python/bin/python3 -c "import _curses; print(_curses.__file__)"; \
     rm -rf "/tmp/Python-${PYVER}" "/tmp/Python-${PYVER}.tgz"
 
 # Prepare a minimal bundled terminfo database for common TERM values.

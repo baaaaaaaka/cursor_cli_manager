@@ -8,7 +8,8 @@ ARG NCURSES_VER=6.4
 # Build deps needed for Python modules we rely on:
 # - libffi-devel: _ctypes
 # - sqlite-devel: sqlite3 (chat DB)
-RUN yum -y install perl-IPC-Cmd libffi-devel sqlite-devel >/dev/null && yum clean all
+# - pkgconfig: allow Python to discover ncurses6
+RUN yum -y install perl-IPC-Cmd libffi-devel sqlite-devel pkgconfig >/dev/null && yum clean all
 
 # Build ncurses6 into /opt/ncurses6 so Python links against ncurses6.
 RUN set -euxo pipefail; \
@@ -46,9 +47,9 @@ RUN set -euxo pipefail; \
     curl -fsSLO "https://www.python.org/ftp/python/${PYVER}/Python-${PYVER}.tgz"; \
     tar -xf "Python-${PYVER}.tgz"; \
     cd "Python-${PYVER}"; \
-    export CPPFLAGS="-I/opt/openssl/include -I/opt/ncurses6/include"; \
-    export CFLAGS="-I/opt/openssl/include -I/opt/ncurses6/include"; \
-    export LDFLAGS="-L/opt/openssl/lib -L/opt/ncurses6/lib"; \
+    export CPPFLAGS="-I/opt/openssl/include -I/opt/ncurses6/include -I/opt/ncurses6/include/ncursesw"; \
+    export CFLAGS="-I/opt/openssl/include -I/opt/ncurses6/include -I/opt/ncurses6/include/ncursesw"; \
+    export LDFLAGS="-L/opt/openssl/lib -L/opt/ncurses6/lib -Wl,-rpath,/opt/ncurses6/lib"; \
     export LD_LIBRARY_PATH="/opt/openssl/lib:/opt/ncurses6/lib"; \
     export PKG_CONFIG_PATH="/opt/ncurses6/lib/pkgconfig"; \
     ./configure --prefix=/opt/python --enable-shared --with-openssl=/opt/openssl --with-openssl-rpath=no --with-ensurepip=install; \

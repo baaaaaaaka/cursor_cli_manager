@@ -132,6 +132,140 @@ jobs:
           name: ccm-macos-arm64.tar.gz
           path: out/ccm-macos-arm64.tar.gz
 
+  smoke-linux:
+    runs-on: ubuntu-latest
+    needs:
+      - build-linux-x86_64-glibc217
+      - build-linux-x86_64-nc5
+      - build-linux-x86_64-nc6
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: glibc217
+            asset: ccm-linux-x86_64-glibc217.tar.gz
+            ncurses_variant: common
+          - name: nc5
+            asset: ccm-linux-x86_64-nc5.tar.gz
+            ncurses_variant: nc5
+          - name: nc6
+            asset: ccm-linux-x86_64-nc6.tar.gz
+            ncurses_variant: nc6
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist
+
+      - name: Prepare checksums.txt
+        run: |
+          set -euxo pipefail
+          cd dist
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.asset }}" > checksums.txt
+          else
+            shasum -a 256 "${{ matrix.asset }}" > checksums.txt
+          fi
+
+      - name: Install linux bundle
+        run: |
+          set -euxo pipefail
+          export CCM_INSTALL_FROM_DIR="${PWD}/dist"
+          export CCM_INSTALL_DEST="${RUNNER_TEMP}/ccm-test/bin"
+          export CCM_INSTALL_ROOT="${RUNNER_TEMP}/ccm-test/root"
+          export CCM_INSTALL_NCURSES_VARIANT="${{ matrix.ncurses_variant }}"
+          export CCM_INSTALL_OS="Linux"
+          export CCM_INSTALL_ARCH="x86_64"
+          mkdir -p "${CCM_INSTALL_DEST}" "${CCM_INSTALL_ROOT}" "${RUNNER_TEMP}/ccm-test/config"
+          sh scripts/install_ccm.sh
+
+      - name: Smoke test linux bundle
+        run: |
+          set -euxo pipefail
+          CFG="${RUNNER_TEMP}/ccm-test/config"
+          "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" doctor
+          "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" list --pretty
+          "${RUNNER_TEMP}/ccm-test/bin/cursor-cli-manager" --config-dir "${CFG}" list
+
+  smoke-macos-x86_64:
+    runs-on: macos-15-intel
+    needs:
+      - build-macos-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download macOS x86_64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ccm-macos-x86_64.tar.gz
+          path: dist
+
+      - name: Prepare checksums.txt
+        run: |
+          set -euxo pipefail
+          cd dist
+          shasum -a 256 ccm-macos-x86_64.tar.gz > checksums.txt
+
+      - name: Install macOS x86_64 bundle
+        run: |
+          set -euxo pipefail
+          export CCM_INSTALL_FROM_DIR="${PWD}/dist"
+          export CCM_INSTALL_DEST="${RUNNER_TEMP}/ccm-test/bin"
+          export CCM_INSTALL_ROOT="${RUNNER_TEMP}/ccm-test/root"
+          export CCM_INSTALL_OS="Darwin"
+          export CCM_INSTALL_ARCH="x86_64"
+          mkdir -p "${CCM_INSTALL_DEST}" "${CCM_INSTALL_ROOT}" "${RUNNER_TEMP}/ccm-test/config"
+          sh scripts/install_ccm.sh
+
+      - name: Smoke test macOS x86_64 bundle
+        run: |
+          set -euxo pipefail
+          CFG="${RUNNER_TEMP}/ccm-test/config"
+          "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" doctor
+          "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" list --pretty
+          "${RUNNER_TEMP}/ccm-test/bin/cursor-cli-manager" --config-dir "${CFG}" list
+
+  smoke-macos-arm64:
+    runs-on: macos-latest
+    needs:
+      - build-macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download macOS arm64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ccm-macos-arm64.tar.gz
+          path: dist
+
+      - name: Prepare checksums.txt
+        run: |
+          set -euxo pipefail
+          cd dist
+          shasum -a 256 ccm-macos-arm64.tar.gz > checksums.txt
+
+      - name: Install macOS arm64 bundle
+        run: |
+          set -euxo pipefail
+          export CCM_INSTALL_FROM_DIR="${PWD}/dist"
+          export CCM_INSTALL_DEST="${RUNNER_TEMP}/ccm-test/bin"
+          export CCM_INSTALL_ROOT="${RUNNER_TEMP}/ccm-test/root"
+          export CCM_INSTALL_OS="Darwin"
+          export CCM_INSTALL_ARCH="arm64"
+          mkdir -p "${CCM_INSTALL_DEST}" "${CCM_INSTALL_ROOT}" "${RUNNER_TEMP}/ccm-test/config"
+          sh scripts/install_ccm.sh
+
+      - name: Smoke test macOS arm64 bundle
+        run: |
+          set -euxo pipefail
+          CFG="${RUNNER_TEMP}/ccm-test/config"
+          "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" doctor
+          "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" list --pretty
+          "${RUNNER_TEMP}/ccm-test/bin/cursor-cli-manager" --config-dir "${CFG}" list
+
   publish:
     runs-on: ubuntu-latest
     needs:
@@ -140,6 +274,9 @@ jobs:
       - build-linux-x86_64-nc6
       - build-macos-x86_64
       - build-macos-arm64
+      - smoke-linux
+      - smoke-macos-x86_64
+      - smoke-macos-arm64
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download artifacts

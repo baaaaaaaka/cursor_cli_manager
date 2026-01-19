@@ -32,7 +32,7 @@ This will:
 Tip: for stability/security, pin the installer to a tag (or commit SHA):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/baaaaaaaka/cursor_cli_manager/v0.6.5/scripts/install_ccm.sh | sh
+curl -fsSL https://raw.githubusercontent.com/baaaaaaaka/cursor_cli_manager/v0.6.6/scripts/install_ccm.sh | sh
 ```
 
 Notes:
