@@ -149,9 +149,10 @@ class TestAgentPatching(unittest.TestCase):
 
             rep2 = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False)
             self.assertTrue(rep2.ok)
-            self.assertEqual(rep2.scanned_files, 1)
+            self.assertEqual(rep2.scanned_files, 0)
             self.assertEqual(len(rep2.patched_files), 0)
             self.assertEqual(rep2.skipped_already_patched, 1)
+            self.assertEqual(rep2.skipped_cached, 1)
 
     def test_patch_upgrades_v1_marker(self) -> None:
         # Simulate a previously patched file using the old marker.
@@ -217,9 +218,30 @@ class TestAgentPatching(unittest.TestCase):
 
             rep2 = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False)
             self.assertTrue(rep2.ok)
+            self.assertEqual(rep2.scanned_files, 0)
+            self.assertEqual(len(rep2.patched_files), 0)
+            self.assertEqual(rep2.skipped_already_patched, 1)
+            self.assertEqual(rep2.skipped_cached, 1)
+
+    def test_patch_force_rescans_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            versions_dir = Path(td) / "versions"
+            vdir = versions_dir / "test-version"
+            vdir.mkdir(parents=True, exist_ok=True)
+            js = vdir / "8658.index.js"
+            js.write_text(SAMPLE_JS, encoding="utf-8")
+
+            rep1 = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False)
+            self.assertTrue(rep1.ok)
+            self.assertEqual(rep1.scanned_files, 1)
+            self.assertEqual(len(rep1.patched_files), 1)
+
+            rep2 = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False, force=True)
+            self.assertTrue(rep2.ok)
             self.assertEqual(rep2.scanned_files, 1)
             self.assertEqual(len(rep2.patched_files), 0)
             self.assertEqual(rep2.skipped_already_patched, 1)
+            self.assertEqual(rep2.skipped_cached, 0)
 
     def test_patch_autorun_controls_force_allow(self) -> None:
         with tempfile.TemporaryDirectory() as td:

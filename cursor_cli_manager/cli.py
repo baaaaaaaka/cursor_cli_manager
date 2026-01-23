@@ -145,6 +145,7 @@ def cmd_open(
     dry_run: bool,
     patch_models: bool = False,
     cursor_agent_versions_dir: Optional[str] = None,
+    force_patch_models: bool = False,
 ) -> int:
     if workspace_path is None:
         print("Error: --workspace is required (cursor-agent chats are grouped by cwd).")
@@ -157,7 +158,7 @@ def cmd_open(
             cursor_agent_path=resolve_cursor_agent_path(),
         )
         if vdir is not None:
-            patch_cursor_agent_models(versions_dir=vdir, dry_run=False)
+            patch_cursor_agent_models(versions_dir=vdir, dry_run=False, force=force_patch_models)
     cmd = build_resume_command(chat_id, workspace_path=workspace_path)
     if dry_run:
         # Display as a shell-friendly snippet.
@@ -352,6 +353,7 @@ def cmd_tui(
     *,
     patch_models: bool = False,
     cursor_agent_versions_dir: Optional[str] = None,
+    force_patch_models: bool = False,
 ) -> int:
     preferred_asset = preferred_linux_asset_switch()
     if preferred_asset:
@@ -370,7 +372,7 @@ def cmd_tui(
             cursor_agent_path=resolve_cursor_agent_path(),
         )
         if vdir is not None:
-            patch_cursor_agent_models(versions_dir=vdir, dry_run=False)
+            patch_cursor_agent_models(versions_dir=vdir, dry_run=False, force=force_patch_models)
 
     # Hide chats whose original workspace folder no longer exists.
     workspaces = _pin_cwd_workspace(
@@ -465,6 +467,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=None,
         help=f"Override cursor-agent versions dir (or set ${ENV_CCM_CURSOR_AGENT_VERSIONS_DIR} / ${ENV_CURSOR_AGENT_VERSIONS_DIR}).",
     )
+    parser.add_argument(
+        "--force-patch-models",
+        dest="force_patch_models",
+        action="store_true",
+        default=False,
+        help="Force a full rescan of cursor-agent bundles (ignore patch cache).",
+    )
 
     sub = parser.add_subparsers(dest="command")
 
@@ -483,6 +492,13 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     p_patch = sub.add_parser("patch-models", help="Patch cursor-agent bundles to prefer AvailableModels.")
     p_patch.add_argument("--dry-run", action="store_true", help="Scan and report without writing.")
+    p_patch.add_argument(
+        "--force",
+        dest="force_patch_models",
+        action="store_true",
+        default=False,
+        help="Force a full rescan of cursor-agent bundles (ignore patch cache).",
+    )
 
     sub.add_parser("upgrade", help="Upgrade ccm (VCS pip install or GitHub-release binary).")
 
@@ -502,6 +518,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             agent_dirs,
             patch_models=should_patch_models(explicit=getattr(args, "patch_models", None)),
             cursor_agent_versions_dir=getattr(args, "cursor_agent_versions_dir", None),
+            force_patch_models=bool(getattr(args, "force_patch_models", False)),
         )
     if cmd == "list":
         return cmd_list(agent_dirs, pretty=bool(args.pretty), with_preview=bool(args.with_preview))
@@ -516,6 +533,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             dry_run=bool(args.dry_run),
             patch_models=should_patch_models(explicit=getattr(args, "patch_models", None)),
             cursor_agent_versions_dir=getattr(args, "cursor_agent_versions_dir", None),
+            force_patch_models=bool(getattr(args, "force_patch_models", False)),
         )
     if cmd == "patch-models":
         vdir = resolve_cursor_agent_versions_dir(
@@ -525,12 +543,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         if vdir is None:
             print("cursor-agent versions dir not found. Set --cursor-agent-versions-dir or $CCM_CURSOR_AGENT_VERSIONS_DIR.")
             return 2
-        rep = patch_cursor_agent_models(versions_dir=vdir, dry_run=bool(getattr(args, "dry_run", False)))
+        rep = patch_cursor_agent_models(
+            versions_dir=vdir,
+            dry_run=bool(getattr(args, "dry_run", False)),
+            force=bool(getattr(args, "force_patch_models", False)),
+        )
         print(f"versions dir: {vdir}")
         print(f"scanned_files: {rep.scanned_files}")
         print(f"patched_files: {len(rep.patched_files)}")
         print(f"already_patched: {rep.skipped_already_patched}")
         print(f"not_applicable: {rep.skipped_not_applicable}")
+        print(f"cached_skips: {rep.skipped_cached}")
         if rep.errors:
             print(f"errors: {len(rep.errors)}")
             for p, e in rep.errors[:10]:

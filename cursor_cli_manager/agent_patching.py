@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 
 ENV_CCM_PATCH_CURSOR_AGENT_MODELS = "CCM_PATCH_CURSOR_AGENT_MODELS"
@@ -14,6 +15,11 @@ ENV_CURSOR_AGENT_VERSIONS_DIR = "CURSOR_AGENT_VERSIONS_DIR"
 _PATCH_MARKER = "CCM_PATCH_AVAILABLE_MODELS_NORMALIZED"
 _PATCH_SIGNATURE = "CCM_PATCH_MODELDETAILS_ONLY"
 _PATCH_AUTORUN_MARKER = "CCM_PATCH_AUTORUN_CONTROLS_DISABLED"
+_PATCH_CACHE_FILENAME = ".ccm-patch-cache.json"
+_PATCH_CACHE_VERSION = 1
+_PATCH_CACHE_SIGNATURE = "|".join([_PATCH_MARKER, _PATCH_SIGNATURE, _PATCH_AUTORUN_MARKER])
+_PATCH_CACHE_STATUS_PATCHED = "already_patched"
+_PATCH_CACHE_STATUS_NOT_APPLICABLE = "not_applicable"
 
 
 def _is_truthy(v: Optional[str]) -> bool:
@@ -127,6 +133,89 @@ def _looks_like_versions_dir(d: Path) -> bool:
     return False
 
 
+def _patch_cache_path(versions_dir: Path) -> Path:
+    return versions_dir / _PATCH_CACHE_FILENAME
+
+
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
+def _coerce_int(value: object) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    return None
+
+
+def _cache_key(path: Path, root: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except Exception:
+        return path.as_posix()
+
+
+def _cache_stat_values(st: os.stat_result) -> Tuple[int, int]:
+    mtime_ns = getattr(st, "st_mtime_ns", None)
+    if not isinstance(mtime_ns, int):
+        mtime_ns = int(st.st_mtime * 1_000_000_000)
+    return int(mtime_ns), int(st.st_size)
+
+
+def _cache_entry_from_stat(status: str, st: os.stat_result) -> Dict[str, Any]:
+    mtime_ns, size = _cache_stat_values(st)
+    return {"mtime_ns": mtime_ns, "size": size, "status": status}
+
+
+def _cache_entry_matches(entry: Dict[str, Any], st: os.stat_result) -> bool:
+    mtime_ns, size = _cache_stat_values(st)
+    return entry.get("mtime_ns") == mtime_ns and entry.get("size") == size
+
+
+def _load_patch_cache(versions_dir: Path) -> Optional[Dict[str, Dict[str, Any]]]:
+    p = _patch_cache_path(versions_dir)
+    if not p.exists():
+        return None
+    try:
+        obj = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    if obj.get("version") != _PATCH_CACHE_VERSION:
+        return None
+    if obj.get("signature") != _PATCH_CACHE_SIGNATURE:
+        return None
+    files = obj.get("files")
+    if not isinstance(files, dict):
+        return None
+    out: Dict[str, Dict[str, Any]] = {}
+    for k, v in files.items():
+        if not isinstance(k, str) or not isinstance(v, dict):
+            continue
+        mtime_ns = _coerce_int(v.get("mtime_ns"))
+        size = _coerce_int(v.get("size"))
+        status = v.get("status")
+        if mtime_ns is None or size is None:
+            continue
+        if status == "patched":
+            status = _PATCH_CACHE_STATUS_PATCHED
+        if status not in (_PATCH_CACHE_STATUS_PATCHED, _PATCH_CACHE_STATUS_NOT_APPLICABLE):
+            continue
+        out[k] = {"mtime_ns": mtime_ns, "size": size, "status": status}
+    return out
+
+
+def _save_patch_cache(versions_dir: Path, files: Dict[str, Dict[str, Any]]) -> None:
+    payload = {"version": _PATCH_CACHE_VERSION, "signature": _PATCH_CACHE_SIGNATURE, "files": files}
+    _atomic_write_json(_patch_cache_path(versions_dir), payload)
+
+
 @dataclass
 class PatchReport:
     versions_dir: Path
@@ -134,6 +223,7 @@ class PatchReport:
     patched_files: List[Path] = field(default_factory=list)
     skipped_already_patched: int = 0
     skipped_not_applicable: int = 0
+    skipped_cached: int = 0
     errors: List[Tuple[Path, str]] = field(default_factory=list)
 
     @property
@@ -302,6 +392,7 @@ def patch_cursor_agent_models(
     *,
     versions_dir: Path,
     dry_run: bool = False,
+    force: bool = False,
 ) -> PatchReport:
     """
     Patch cursor-agent bundles:
@@ -311,8 +402,14 @@ def patch_cursor_agent_models(
     This is a best-effort patch:
     - It only touches files that contain either `fetchUsableModels(aiServerClient)` or `const autoRunControls = ...`.
     - It is idempotent (skips files already patched).
+    - It caches scan results to avoid re-reading unchanged files (unless force/dry_run).
     """
     rep = PatchReport(versions_dir=versions_dir)
+    cache: Optional[Dict[str, Dict[str, Any]]] = None
+    if (not dry_run) and (not force):
+        cache = _load_patch_cache(versions_dir)
+    cache_files = cache or {}
+    new_cache: Optional[Dict[str, Dict[str, Any]]] = {} if not dry_run else None
     try:
         version_dirs = [p for p in versions_dir.iterdir() if p.is_dir()]
     except Exception as e:
@@ -326,6 +423,26 @@ def patch_cursor_agent_models(
             rep.errors.append((vdir, f"failed to list js files: {e}"))
             continue
         for p in js_files:
+            cache_key = _cache_key(p, versions_dir)
+            st: Optional[os.stat_result] = None
+            if cache is not None:
+                try:
+                    st = p.stat()
+                except Exception as e:
+                    rep.errors.append((p, f"stat failed: {e}"))
+                    continue
+                cached = cache_files.get(cache_key)
+                if isinstance(cached, dict) and _cache_entry_matches(cached, st):
+                    rep.skipped_cached += 1
+                    status = cached.get("status")
+                    if status == _PATCH_CACHE_STATUS_PATCHED:
+                        rep.skipped_already_patched += 1
+                    elif status == _PATCH_CACHE_STATUS_NOT_APPLICABLE:
+                        rep.skipped_not_applicable += 1
+                    if new_cache is not None:
+                        new_cache[cache_key] = cached
+                    continue
+
             rep.scanned_files += 1
             try:
                 txt = p.read_text(encoding="utf-8", errors="replace")
@@ -366,17 +483,33 @@ def patch_cursor_agent_models(
                     changed = True
 
             if not changed:
+                status = _PATCH_CACHE_STATUS_NOT_APPLICABLE
                 if auto_found or model_already_patched:
                     rep.skipped_already_patched += 1
+                    status = _PATCH_CACHE_STATUS_PATCHED
                 elif model_found and model_unpatchable:
                     rep.skipped_not_applicable += 1
                 else:
                     rep.skipped_not_applicable += 1
+                if new_cache is not None:
+                    if st is None:
+                        try:
+                            st = p.stat()
+                        except Exception:
+                            st = None
+                    if st is not None:
+                        new_cache[cache_key] = _cache_entry_from_stat(status, st)
                 continue
 
             if dry_run:
                 rep.patched_files.append(p)
                 continue
+
+            if st is None:
+                try:
+                    st = p.stat()
+                except Exception:
+                    st = None
 
             # Best-effort backup once.
             bak = p.with_suffix(p.suffix + ".ccm.bak")
@@ -400,9 +533,21 @@ def patch_cursor_agent_models(
                     except Exception:
                         pass
                 rep.patched_files.append(p)
+                if new_cache is not None:
+                    try:
+                        st_after = p.stat()
+                    except Exception:
+                        st_after = None
+                    if st_after is not None:
+                        new_cache[cache_key] = _cache_entry_from_stat(_PATCH_CACHE_STATUS_PATCHED, st_after)
             except Exception as e:
                 rep.errors.append((p, f"write failed: {e}"))
                 continue
 
+    if new_cache is not None:
+        try:
+            _save_patch_cache(versions_dir, new_cache)
+        except Exception:
+            pass
     return rep
 
