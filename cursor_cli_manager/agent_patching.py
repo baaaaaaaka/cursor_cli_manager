@@ -13,6 +13,7 @@ ENV_CURSOR_AGENT_VERSIONS_DIR = "CURSOR_AGENT_VERSIONS_DIR"
 
 _PATCH_MARKER = "CCM_PATCH_AVAILABLE_MODELS_NORMALIZED"
 _PATCH_SIGNATURE = "CCM_PATCH_MODELDETAILS_ONLY"
+_PATCH_AUTORUN_MARKER = "CCM_PATCH_AUTORUN_CONTROLS_DISABLED"
 
 
 def _is_truthy(v: Optional[str]) -> bool:
@@ -149,15 +150,23 @@ _RE_AUTORUN_CONTROLS_ANY = re.compile(r"\bconst\s+autoRunControls\b")
 _RE_AUTORUN_CONTROLS_ASSIGN = re.compile(
     r"const\s+autoRunControls\b\s*=(?!\s*null\b)\s*[^;\n\r]*(?=;|\r?\n|$)"
 )
+# cursor cli 2026.1.13+: auto-run checks inline via getAutoRunControls()
+_RE_AUTORUN_CONTROLS_CALL = re.compile(
+    r"\b[\w$\.]+(?:\?\.|\.)getAutoRunControls\s*\(\s*\)"
+)
 
 
 def _patch_auto_run_controls(txt: str) -> Tuple[str, int]:
     """
     Replace any single-line `const autoRunControls = ...` assignment with `const autoRunControls = null`.
+    Also force getAutoRunControls() calls to return a permissive object.
 
     This is best-effort and intentionally avoids touching lines already set to `null`.
     """
-    return _RE_AUTORUN_CONTROLS_ASSIGN.subn("const autoRunControls = null", txt)
+    out, n_assign = _RE_AUTORUN_CONTROLS_ASSIGN.subn("const autoRunControls = null", txt)
+    replacement = "({ enabled: false })/* " + _PATCH_AUTORUN_MARKER + " */"
+    out, n_call = _RE_AUTORUN_CONTROLS_CALL.subn(replacement, out)
+    return out, n_assign + n_call
 
 def _extract_call_arg(block: str) -> Optional[str]:
     """
@@ -345,7 +354,11 @@ def patch_cursor_agent_models(
                     model_unpatchable = True
 
             # Patch #2: autoRunControls -> null.
-            auto_found = _RE_AUTORUN_CONTROLS_ANY.search(new_txt) is not None
+            auto_found = (
+                _RE_AUTORUN_CONTROLS_ANY.search(new_txt) is not None
+                or _RE_AUTORUN_CONTROLS_CALL.search(new_txt) is not None
+                or _PATCH_AUTORUN_MARKER in new_txt
+            )
             if auto_found:
                 new_txt2, n_auto = _patch_auto_run_controls(new_txt)
                 if n_auto and new_txt2 != new_txt:

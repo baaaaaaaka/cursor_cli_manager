@@ -56,6 +56,20 @@ function checkAutoRun(teamSettingsService, teamAdminSettings) {
 if (true) {const autoRunControls=teamAdminSettings === null || teamAdminSettings === void 0 ? void 0 : teamAdminSettings.autoRunControls;console.log(autoRunControls);}
 """
 
+SAMPLE_JS_AUTORUN_CALL_ONLY = """
+var __awaiter = (this && this.__awaiter) || function () {};
+
+function getPermissions(teamSettingsService) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const res = yield teamSettingsService.getAutoRunControls();
+        if (res && res.enabled) {
+            return false;
+        }
+        return true;
+    });
+}
+"""
+
 
 class TestAgentPatching(unittest.TestCase):
     def test_should_patch_models_env(self) -> None:
@@ -206,6 +220,28 @@ class TestAgentPatching(unittest.TestCase):
             self.assertEqual(rep2.scanned_files, 1)
             self.assertEqual(len(rep2.patched_files), 0)
             self.assertEqual(rep2.skipped_already_patched, 1)
+
+    def test_patch_autorun_controls_force_allow(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            versions_dir = Path(td) / "versions"
+            vdir = versions_dir / "test-version"
+            vdir.mkdir(parents=True, exist_ok=True)
+            js = vdir / "1234.index.js"
+            js.write_text(SAMPLE_JS_AUTORUN_CALL_ONLY, encoding="utf-8")
+
+            rep1 = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False)
+            self.assertTrue(rep1.ok)
+            self.assertEqual(rep1.scanned_files, 1)
+            self.assertEqual(len(rep1.patched_files), 1)
+
+            patched = js.read_text(encoding="utf-8")
+            self.assertIn("({ enabled: false })", patched)
+            self.assertIn("CCM_PATCH_AUTORUN_CONTROLS_DISABLED", patched)
+            self.assertNotIn("getAutoRunControls", patched)
+
+            bak = js.with_suffix(js.suffix + ".ccm.bak")
+            self.assertTrue(bak.exists())
+            self.assertIn("getAutoRunControls", bak.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
