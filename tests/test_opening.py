@@ -129,11 +129,9 @@ class TestOpening(unittest.TestCase):
     def test_prepare_exec_command_drops_force_when_unsupported(self) -> None:
         import cursor_cli_manager.opening as opening
 
-        old_supported = getattr(opening, "_FORCE_SUPPORTED", None)
-        old_supported_agent = getattr(opening, "_FORCE_SUPPORTED_AGENT", None)
+        old_cache = dict(opening._OPTION_SUPPORT_CACHE)
         try:
-            opening._FORCE_SUPPORTED = None
-            opening._FORCE_SUPPORTED_AGENT = None
+            opening._OPTION_SUPPORT_CACHE.clear()
 
             with patch("cursor_cli_manager.opening._default_runner", return_value=(2, "", "unknown option: --force")):
                 cmd = ["/tmp/cursor-agent", "--workspace", "/tmp/ws", "--force", "--resume", "abc123"]
@@ -142,8 +140,82 @@ class TestOpening(unittest.TestCase):
                 self.assertIn("--resume", prepared)
                 self.assertIn("abc123", prepared)
         finally:
-            opening._FORCE_SUPPORTED = old_supported
-            opening._FORCE_SUPPORTED_AGENT = old_supported_agent
+            opening._OPTION_SUPPORT_CACHE.clear()
+            opening._OPTION_SUPPORT_CACHE.update(old_cache)
+
+    def test_prepare_exec_command_filters_optional_flags(self) -> None:
+        import cursor_cli_manager.opening as opening
+
+        def supports_flag(_agent, flag):  # noqa: ANN001
+            return flag != "--browser"
+
+        with patch("cursor_cli_manager.opening._supports_optional_flag", side_effect=supports_flag):
+            cmd = ["/tmp/cursor-agent", "--browser", "--approve-mcps", "--resume", "abc123"]
+            prepared = opening._prepare_exec_command(cmd)
+            self.assertNotIn("--browser", prepared)
+            self.assertIn("--approve-mcps", prepared)
+            self.assertIn("--resume", prepared)
+            self.assertIn("abc123", prepared)
+
+    def test_prepare_exec_command_drops_short_force_when_unsupported(self) -> None:
+        import cursor_cli_manager.opening as opening
+
+        with patch("cursor_cli_manager.opening._supports_optional_flag", return_value=False):
+            cmd = ["/tmp/cursor-agent", "--force", "-f", "--resume", "abc123"]
+            prepared = opening._prepare_exec_command(cmd)
+            self.assertNotIn("--force", prepared)
+            self.assertNotIn("-f", prepared)
+
+    def test_supports_optional_flag_caches_result(self) -> None:
+        import cursor_cli_manager.opening as opening
+
+        old_cache = dict(opening._OPTION_SUPPORT_CACHE)
+        try:
+            opening._OPTION_SUPPORT_CACHE.clear()
+            calls = []
+
+            def fake_runner(cmd, _timeout_s):  # noqa: ANN001
+                calls.append(list(cmd))
+                return 0, "", ""
+
+            with patch("cursor_cli_manager.opening._default_runner", side_effect=fake_runner):
+                self.assertTrue(opening._supports_optional_flag("/tmp/cursor-agent", "--browser"))
+                self.assertTrue(opening._supports_optional_flag("/tmp/cursor-agent", "--browser"))
+
+            self.assertEqual(len(calls), 1)
+        finally:
+            opening._OPTION_SUPPORT_CACHE.clear()
+            opening._OPTION_SUPPORT_CACHE.update(old_cache)
+
+    def test_remove_flag_from_cmd_drops_value_pair(self) -> None:
+        import cursor_cli_manager.opening as opening
+
+        cmd = ["/tmp/cursor-agent", "--browser", "1", "--resume", "abc123"]
+        self.assertEqual(
+            opening._remove_flag_from_cmd(cmd, "--browser"),
+            ["/tmp/cursor-agent", "--resume", "abc123"],
+        )
+
+    def test_remove_flag_from_cmd_drops_equals_form(self) -> None:
+        import cursor_cli_manager.opening as opening
+
+        cmd = ["/tmp/cursor-agent", "--browser=1", "--resume", "abc123"]
+        self.assertEqual(
+            opening._remove_flag_from_cmd(cmd, "--browser"),
+            ["/tmp/cursor-agent", "--resume", "abc123"],
+        )
+
+    def test_extract_unknown_option_parses_unrecognized_arguments(self) -> None:
+        import cursor_cli_manager.opening as opening
+
+        err = "error: unrecognized arguments --browser --approve-mcps\n"
+        self.assertEqual(opening._extract_unknown_option(err), "--browser")
+
+    def test_extract_unknown_option_parses_short_flag(self) -> None:
+        import cursor_cli_manager.opening as opening
+
+        err = "error: unknown option -f\n"
+        self.assertEqual(opening._extract_unknown_option(err), "-f")
 
     def test_exec_new_chat_prints_launching_message_before_exec(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -156,7 +228,7 @@ class TestOpening(unittest.TestCase):
             err_buf = io.StringIO()
             with patch(
                 "cursor_cli_manager.opening.get_cursor_agent_flags", return_value=DEFAULT_CURSOR_AGENT_FLAGS
-            ), patch("cursor_cli_manager.opening._supports_force_flag", return_value=True), patch(
+            ), patch("cursor_cli_manager.opening._supports_optional_flag", return_value=True), patch(
                 "cursor_cli_manager.opening._run_cursor_agent", return_value=(0, "")
             ), redirect_stderr(err_buf):
                 with self.assertRaises(SystemExit):
@@ -175,7 +247,7 @@ class TestOpening(unittest.TestCase):
             err_buf = io.StringIO()
             with patch(
                 "cursor_cli_manager.opening.get_cursor_agent_flags", return_value=DEFAULT_CURSOR_AGENT_FLAGS
-            ), patch("cursor_cli_manager.opening._supports_force_flag", return_value=True), patch(
+            ), patch("cursor_cli_manager.opening._supports_optional_flag", return_value=True), patch(
                 "cursor_cli_manager.opening._run_cursor_agent", return_value=(0, "")
             ), redirect_stderr(err_buf):
                 with self.assertRaises(SystemExit):
@@ -205,7 +277,7 @@ class TestOpening(unittest.TestCase):
 
             with patch(
                 "cursor_cli_manager.opening.get_cursor_agent_flags", return_value=DEFAULT_CURSOR_AGENT_FLAGS
-            ), patch("cursor_cli_manager.opening._supports_force_flag", return_value=True), patch(
+            ), patch("cursor_cli_manager.opening._supports_optional_flag", return_value=True), patch(
                 "cursor_cli_manager.opening._run_cursor_agent", return_value=(1, err_msg)
             ), patch("cursor_cli_manager.opening.os.execvp", side_effect=fake_execvp):
                 with self.assertRaises(RuntimeError):
@@ -213,6 +285,93 @@ class TestOpening(unittest.TestCase):
 
             self.assertIn("--workspace", captured["args"])
             self.assertNotIn("--force", captured["args"])
+
+    def test_exec_new_chat_drops_unknown_force_then_execs(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            ws = td_path / "ws"
+            ws.mkdir(parents=True, exist_ok=True)
+            agent = td_path / "cursor-agent"
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+            err_msg = "error: unknown option '--force'\n"
+            captured: dict = {}
+
+            def fake_execvp(_file, args):  # noqa: ANN001
+                captured["args"] = list(args)
+                raise RuntimeError("exec called")
+
+            with patch(
+                "cursor_cli_manager.opening.get_cursor_agent_flags", return_value=DEFAULT_CURSOR_AGENT_FLAGS
+            ), patch("cursor_cli_manager.opening._supports_optional_flag", return_value=True), patch(
+                "cursor_cli_manager.opening._run_cursor_agent", return_value=(2, err_msg)
+            ), patch("cursor_cli_manager.opening.os.execvp", side_effect=fake_execvp):
+                with self.assertRaises(RuntimeError):
+                    exec_new_chat(workspace_path=ws, cursor_agent_path=str(agent))
+
+            self.assertNotIn("--force", captured["args"])
+
+    def test_exec_new_chat_retries_without_unknown_option(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            ws = td_path / "ws"
+            ws.mkdir(parents=True, exist_ok=True)
+            agent = td_path / "cursor-agent"
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+            err_msg = "error: unknown option '--browser'\n"
+            calls = []
+
+            def fake_run(cmd):  # noqa: ANN001
+                calls.append(list(cmd))
+                if len(calls) == 1:
+                    return 2, err_msg
+                return 0, ""
+
+            with patch(
+                "cursor_cli_manager.opening.get_cursor_agent_flags", return_value=DEFAULT_CURSOR_AGENT_FLAGS
+            ), patch("cursor_cli_manager.opening._supports_optional_flag", return_value=True), patch(
+                "cursor_cli_manager.opening._run_cursor_agent", side_effect=fake_run
+            ):
+                with self.assertRaises(SystemExit):
+                    exec_new_chat(workspace_path=ws, cursor_agent_path=str(agent))
+
+            self.assertIn("--browser", calls[0])
+            self.assertNotIn("--browser", calls[1])
+            self.assertIn("--approve-mcps", calls[1])
+
+    def test_exec_new_chat_retries_for_multiple_unknown_options(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            ws = td_path / "ws"
+            ws.mkdir(parents=True, exist_ok=True)
+            agent = td_path / "cursor-agent"
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+            err_msgs = [
+                "error: unknown option '--browser'\n",
+                "error: unrecognized option '--approve-mcps'\n",
+            ]
+            calls = []
+
+            def fake_run(cmd):  # noqa: ANN001
+                calls.append(list(cmd))
+                if len(calls) <= len(err_msgs):
+                    return 2, err_msgs[len(calls) - 1]
+                return 0, ""
+
+            with patch(
+                "cursor_cli_manager.opening.get_cursor_agent_flags", return_value=DEFAULT_CURSOR_AGENT_FLAGS
+            ), patch("cursor_cli_manager.opening._supports_optional_flag", return_value=True), patch(
+                "cursor_cli_manager.opening._run_cursor_agent", side_effect=fake_run
+            ):
+                with self.assertRaises(SystemExit):
+                    exec_new_chat(workspace_path=ws, cursor_agent_path=str(agent))
+
+            self.assertIn("--browser", calls[0])
+            self.assertNotIn("--browser", calls[1])
+            self.assertIn("--approve-mcps", calls[1])
+            self.assertNotIn("--approve-mcps", calls[2])
 
 
 if __name__ == "__main__":

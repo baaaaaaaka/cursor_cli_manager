@@ -8,7 +8,7 @@ import subprocess
 import threading
 import sys
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from cursor_cli_manager.update import _default_runner
 
@@ -19,15 +19,30 @@ ENV_CURSOR_AGENT_PATH = "CURSOR_AGENT_PATH"
 DEFAULT_CURSOR_AGENT_FLAGS = ["--approve-mcps", "--browser", "--force"]
 
 _FORCE_DISABLED_RETRY_MESSAGE = "Detected 'Run Everything' restriction; retrying without '--force'."
+_UNKNOWN_OPTION_RETRY_MESSAGE = "Detected unsupported cursor-agent option {flag!r}; retrying without it."
+
+_FLAG_TOKEN_RE = re.compile(r"-{1,2}[A-Za-z][\w-]*")
+_UNRECOGNIZED_ARGUMENTS_RE = re.compile(
+    r"unrecognized (?:arguments?|options?)\s*:?\s*([^\n\r]+)", re.IGNORECASE
+)
+_OPTION_ERROR_PATTERNS = (
+    re.compile(
+        r"(?:unknown|unrecognized|invalid|unsupported|unexpected)\s+option(?:\s*[:])?\s*['\"]?(-{1,2}[A-Za-z][\w-]*)['\"]?",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:unknown|unrecognized|invalid|unsupported|unexpected)\s+argument(?:\s*[:])?\s*['\"]?(-{1,2}[A-Za-z][\w-]*)['\"]?",
+        re.IGNORECASE,
+    ),
+)
 
 
 _PROBE_LOCK = threading.Lock()
 _PROBE_STARTED = False
 _PROBED_CURSOR_AGENT_FLAGS: Optional[List[str]] = None
 
-_FORCE_LOCK = threading.Lock()
-_FORCE_SUPPORTED: Optional[bool] = None
-_FORCE_SUPPORTED_AGENT: Optional[str] = None
+_OPTION_SUPPORT_LOCK = threading.Lock()
+_OPTION_SUPPORT_CACHE: Dict[Tuple[str, str], bool] = {}
 
 
 def _help_supports_flag(help_text: str, flag: str) -> bool:
@@ -35,6 +50,51 @@ def _help_supports_flag(help_text: str, flag: str) -> bool:
     # Allow common separators after a flag: whitespace, comma, "=", or "[".
     pat = r"(^|\s)" + re.escape(flag) + r"(\s|,|=|\[|$)"
     return bool(re.search(pat, help_text or "", flags=re.MULTILINE))
+
+
+def _extract_unknown_option(stderr_text: str) -> Optional[str]:
+    if not stderr_text:
+        return None
+    match = _UNRECOGNIZED_ARGUMENTS_RE.search(stderr_text)
+    if match:
+        segment = match.group(1)
+        flag_match = _FLAG_TOKEN_RE.search(segment)
+        if flag_match:
+            return flag_match.group(0)
+    for pat in _OPTION_ERROR_PATTERNS:
+        match = pat.search(stderr_text)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _command_contains_flag(cmd: List[str], flag: str) -> bool:
+    if flag in cmd:
+        return True
+    if flag.startswith("--"):
+        prefix = f"{flag}="
+        return any(arg.startswith(prefix) for arg in cmd)
+    return False
+
+
+def _remove_flag_from_cmd(cmd: List[str], flag: str) -> List[str]:
+    if not cmd:
+        return []
+    prefix = f"{flag}=" if flag.startswith("--") else None
+    out: List[str] = []
+    skip_next = False
+    for idx, arg in enumerate(cmd):
+        if skip_next:
+            skip_next = False
+            continue
+        if arg == flag:
+            if idx + 1 < len(cmd) and not cmd[idx + 1].startswith("-"):
+                skip_next = True
+            continue
+        if prefix and arg.startswith(prefix):
+            continue
+        out.append(arg)
+    return out
 
 
 def start_cursor_agent_flag_probe(*, timeout_s: float = 1.0) -> None:
@@ -80,30 +140,27 @@ def get_cursor_agent_flags() -> List[str]:
     return list(probed) if probed is not None else list(DEFAULT_CURSOR_AGENT_FLAGS)
 
 
-def _supports_force_flag(agent: str, *, timeout_s: float = 1.0) -> bool:
+def _supports_optional_flag(agent: str, flag: str, *, timeout_s: float = 1.0) -> bool:
     """
-    Best-effort check whether the installed cursor-agent supports `--force`.
-
-    We validate by invoking `agent --force --help`:
-    - If it exits 0, the flag is accepted.
-    - If it fails, we will avoid passing `--force` when launching a chat.
+    Best-effort check whether the installed cursor-agent supports a flag.
     """
-    global _FORCE_SUPPORTED, _FORCE_SUPPORTED_AGENT
-    cached = _FORCE_SUPPORTED
-    if cached is not None and _FORCE_SUPPORTED_AGENT == agent:
+    if not agent or not flag:
+        return False
+    key = (agent, flag)
+    cached = _OPTION_SUPPORT_CACHE.get(key)
+    if cached is not None:
         return cached
-    with _FORCE_LOCK:
-        cached = _FORCE_SUPPORTED
-        if cached is not None and _FORCE_SUPPORTED_AGENT == agent:
+    with _OPTION_SUPPORT_LOCK:
+        cached = _OPTION_SUPPORT_CACHE.get(key)
+        if cached is not None:
             return cached
         ok = False
         try:
-            rc, _out, _err = _default_runner([agent, "--force", "--help"], timeout_s)
+            rc, _out, _err = _default_runner([agent, flag, "--help"], timeout_s)
             ok = rc == 0
         except Exception:
             ok = False
-        _FORCE_SUPPORTED = ok
-        _FORCE_SUPPORTED_AGENT = agent
+        _OPTION_SUPPORT_CACHE[key] = ok
         return ok
 
 
@@ -111,15 +168,26 @@ def _without_force_flag(cmd: List[str]) -> List[str]:
     return [c for c in cmd if c not in ("--force", "-f")]
 
 
+def _filter_supported_optional_flags(cmd: List[str]) -> List[str]:
+    if not cmd:
+        return []
+    agent = cmd[0]
+    if not agent:
+        return cmd
+    filtered = list(cmd)
+    for flag in DEFAULT_CURSOR_AGENT_FLAGS:
+        if _command_contains_flag(filtered, flag) and not _supports_optional_flag(agent, flag):
+            filtered = _remove_flag_from_cmd(filtered, flag)
+            if flag == "--force" and _command_contains_flag(filtered, "-f"):
+                filtered = _remove_flag_from_cmd(filtered, "-f")
+    return filtered
+
+
 def _prepare_exec_command(cmd: List[str]) -> List[str]:
     """
     Apply last-mile compatibility tweaks before exec'ing cursor-agent.
     """
-    if "--force" in cmd or "-f" in cmd:
-        agent = cmd[0] if cmd else ""
-        if agent and not _supports_force_flag(agent):
-            return _without_force_flag(cmd)
-    return cmd
+    return _filter_supported_optional_flags(cmd)
 
 
 def _stderr_indicates_force_disabled(stderr_text: str) -> bool:
@@ -171,15 +239,29 @@ def _run_cursor_agent(cmd: List[str]) -> Tuple[int, str]:
 
 def _exec_cursor_agent(cmd: List[str]) -> "os.NoReturn":
     if "--force" in cmd or "-f" in cmd:
-        rc, err = _run_cursor_agent(cmd)
-        if rc != 0 and _stderr_indicates_force_disabled(err):
-            retry_cmd = _without_force_flag(cmd)
-            try:
-                print(_FORCE_DISABLED_RETRY_MESSAGE, file=sys.stderr, flush=True)
-            except Exception:
-                pass
-            os.execvp(retry_cmd[0], retry_cmd)
-        raise SystemExit(rc)
+        retry_cmd = list(cmd)
+        while True:
+            rc, err = _run_cursor_agent(retry_cmd)
+            if rc == 0:
+                raise SystemExit(0)
+            if _stderr_indicates_force_disabled(err) and ("--force" in retry_cmd or "-f" in retry_cmd):
+                retry_cmd = _without_force_flag(retry_cmd)
+                try:
+                    print(_FORCE_DISABLED_RETRY_MESSAGE, file=sys.stderr, flush=True)
+                except Exception:
+                    pass
+                os.execvp(retry_cmd[0], retry_cmd)
+            bad_flag = _extract_unknown_option(err)
+            if bad_flag and bad_flag in DEFAULT_CURSOR_AGENT_FLAGS and _command_contains_flag(retry_cmd, bad_flag):
+                retry_cmd = _remove_flag_from_cmd(retry_cmd, bad_flag)
+                try:
+                    print(_UNKNOWN_OPTION_RETRY_MESSAGE.format(flag=bad_flag), file=sys.stderr, flush=True)
+                except Exception:
+                    pass
+                if "--force" not in retry_cmd and "-f" not in retry_cmd:
+                    os.execvp(retry_cmd[0], retry_cmd)
+                continue
+            raise SystemExit(rc)
     os.execvp(cmd[0], cmd)
 
 
