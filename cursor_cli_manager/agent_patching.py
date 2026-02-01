@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -93,7 +94,7 @@ def _infer_versions_dir_from_cursor_agent_executable(cursor_agent_path: str) -> 
 
     We avoid hard-coded absolute locations and instead look for a directory that:
     - contains subdirectories, and
-    - at least one subdirectory looks like a cursor-agent "version dir" (has `cursor-agent` + `*.index.js`).
+    - at least one subdirectory looks like a cursor-agent "version dir" (runner + `*.index.js`).
     """
     p = Path(cursor_agent_path).expanduser()
     if not p.exists():
@@ -108,7 +109,28 @@ def _infer_versions_dir_from_cursor_agent_executable(cursor_agent_path: str) -> 
     for d in [start] + list(start.parents)[:8]:
         if _looks_like_versions_dir(d):
             return d
+        candidate = d / "versions"
+        if _looks_like_versions_dir(candidate):
+            return candidate
     return None
+
+
+def _looks_like_version_subdir(vdir: Path) -> bool:
+    if not vdir.exists() or not vdir.is_dir():
+        return False
+    try:
+        if not any(vdir.glob("*.index.js")):
+            return False
+        if (vdir / "cursor-agent").exists():
+            return True
+        if sys.platform.startswith("win"):
+            if (vdir / "cursor-agent.exe").exists():
+                return True
+            if (vdir / "node.exe").exists() or (vdir / "index.js").exists():
+                return True
+    except Exception:
+        return False
+    return False
 
 
 def _looks_like_versions_dir(d: Path) -> bool:
@@ -120,16 +142,8 @@ def _looks_like_versions_dir(d: Path) -> bool:
         return False
     # Heuristic: a versions dir should contain at least one "version dir" with expected files.
     for vdir in children[:200]:
-        try:
-            if not vdir.is_dir():
-                continue
-            # Must have the runner and at least one webpack chunk.
-            if not (vdir / "cursor-agent").exists():
-                continue
-            if any(vdir.glob("*.index.js")):
-                return True
-        except Exception:
-            continue
+        if _looks_like_version_subdir(vdir):
+            return True
     return False
 
 

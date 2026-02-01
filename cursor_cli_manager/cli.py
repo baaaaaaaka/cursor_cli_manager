@@ -8,6 +8,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+if sys.platform.startswith("win"):
+    from cursor_cli_manager.windows_deps import ensure_windows_deps
+
+    ensure_windows_deps()
+
 import curses
 
 from cursor_cli_manager.agent_discovery import discover_agent_chats, discover_agent_workspaces

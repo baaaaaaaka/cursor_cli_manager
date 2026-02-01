@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from cursor_cli_manager.agent_patching import (
     ENV_CCM_CURSOR_AGENT_VERSIONS_DIR,
@@ -122,6 +123,37 @@ class TestAgentPatching(unittest.TestCase):
             self.assertIsNotNone(inferred)
             # macOS commonly exposes /var as a symlink to /private/var; normalize via resolve().
             self.assertEqual(inferred.resolve(), versions_dir.resolve())
+
+    def test_resolve_versions_dir_windows_wrapper_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            wrapper = root / "cursor-agent.CMD"
+            wrapper.write_text("@echo off\n", encoding="utf-8")
+            versions_dir = root / "versions"
+            vdir = versions_dir / "2026.01.28-abcd123"
+            vdir.mkdir(parents=True, exist_ok=True)
+            (vdir / "node.exe").write_text("", encoding="utf-8")
+            (vdir / "123.index.js").write_text(SAMPLE_JS, encoding="utf-8")
+
+            with patch("cursor_cli_manager.agent_patching.sys.platform", "win32"):
+                inferred = resolve_cursor_agent_versions_dir(cursor_agent_path=str(wrapper))
+                self.assertIsNotNone(inferred)
+                self.assertEqual(inferred.resolve(), versions_dir.resolve())
+
+    def test_resolve_versions_dir_windows_layout_ignored_on_non_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            wrapper = root / "cursor-agent.CMD"
+            wrapper.write_text("@echo off\n", encoding="utf-8")
+            versions_dir = root / "versions"
+            vdir = versions_dir / "2026.01.28-abcd123"
+            vdir.mkdir(parents=True, exist_ok=True)
+            (vdir / "node.exe").write_text("", encoding="utf-8")
+            (vdir / "123.index.js").write_text(SAMPLE_JS, encoding="utf-8")
+
+            with patch("cursor_cli_manager.agent_patching.sys.platform", "linux"):
+                inferred = resolve_cursor_agent_versions_dir(cursor_agent_path=str(wrapper))
+                self.assertIsNone(inferred)
 
     def test_patch_cursor_agent_models_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as td:

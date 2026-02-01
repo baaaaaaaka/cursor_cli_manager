@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cursor-cli-manager"
-version = "0.6.11"
+version = "0.6.12"
 description = "Terminal UI manager for cursor-agent chats (terminal-only)."
 readme = "README.md"
 requires-python = ">=3.7"
