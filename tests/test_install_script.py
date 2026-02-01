@@ -6,9 +6,11 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+import sys
 from pathlib import Path
 
 
+@unittest.skipIf(sys.platform.startswith("win"), "Install script targets POSIX shells")
 class TestInstallScript(unittest.TestCase):
     def _run_install(
         self, *, from_dir: Path, dest_dir: Path, root_dir: Path, checksums_ok: bool, tag: str = "latest"

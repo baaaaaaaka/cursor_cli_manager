@@ -17,7 +17,7 @@ class TestModels(unittest.TestCase):
     def test_agent_workspace_display_name_root_path(self) -> None:
         # Root has empty .name on POSIX; should fall back to the full string path.
         ws = AgentWorkspace(cwd_hash="abc", workspace_path=Path("/"), chats_root=Path("/tmp/chats/abc"))
-        self.assertEqual(ws.display_name, "/")
+        self.assertEqual(ws.display_name, str(Path("/")))
 
 
 if __name__ == "__main__":

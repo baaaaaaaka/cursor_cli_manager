@@ -116,6 +116,8 @@ class TestTuiRenderingModels(unittest.TestCase):
             self.assertEqual(display_width(text), rect.w - 2)
 
     def test_list_rows_dim_all_when_unfocused(self) -> None:
+        if not curses.A_DIM:
+            self.skipTest("curses.A_DIM is not supported on this platform")
         rect = Rect(0, 0, 8, 24)  # inner is 6x22
         theme = Theme(focused_selected_attr=1, unfocused_selected_attr=2)
         state = ListState()

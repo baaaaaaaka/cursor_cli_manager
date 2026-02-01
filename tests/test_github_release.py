@@ -161,7 +161,8 @@ class TestGithubReleaseFetchAndInstall(unittest.TestCase):
             exe = (install_root / "current" / "ccm" / "ccm").resolve()
             self.assertTrue(exe.exists())
             self.assertEqual(exe.read_bytes(), payload)
-            self.assertTrue(exe.stat().st_mode & stat.S_IXUSR)
+            if os.name != "nt":
+                self.assertTrue(exe.stat().st_mode & stat.S_IXUSR)
             self.assertTrue((bin_dir / "ccm").is_symlink())
             self.assertEqual((bin_dir / "ccm").resolve(), exe)
             self.assertTrue((bin_dir / "cursor-cli-manager").is_symlink())

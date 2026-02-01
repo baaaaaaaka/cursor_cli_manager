@@ -1,3 +1,4 @@
+import os
 import subprocess
 import unittest
 from unittest.mock import patch
@@ -53,6 +54,9 @@ class TestUpdateDefaultRunner(unittest.TestCase):
 
     def test_default_runner_timeout_kills_process_group(self) -> None:
         from cursor_cli_manager import update as upd
+
+        if not hasattr(os, "killpg"):
+            self.skipTest("os.killpg is not available on this platform")
 
         fake = _FakeProc(communicate_side_effect=subprocess.TimeoutExpired(cmd="x", timeout=0.01))
 

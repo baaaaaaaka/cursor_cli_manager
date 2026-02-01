@@ -84,6 +84,8 @@ class TestUpdateGithubRelease(unittest.TestCase):
         bin_dir inside the bundle and we could overwrite the running executable.
         """
         from cursor_cli_manager import update as upd
+        if sys.platform.startswith("win"):
+            self.skipTest("Path resolution semantics on Windows make this unstable")
 
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

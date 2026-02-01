@@ -349,16 +349,28 @@ def exec_resume_chat(
     so we `chdir()` into the workspace path (when available) to ensure the
     correct chat store is used.
     """
+    old_cwd: Optional[Path] = None
     if workspace_path is not None:
+        try:
+            old_cwd = Path.cwd()
+        except Exception:
+            old_cwd = None
         os.chdir(workspace_path)
-    cmd = build_resume_command(chat_id, workspace_path=workspace_path, cursor_agent_path=cursor_agent_path)
-    cmd = _prepare_exec_command(cmd)
     try:
-        ws = f" in {workspace_path}" if workspace_path is not None else ""
-        print(f"Launching cursor-agent{ws}… (resume {chat_id})", file=sys.stderr, flush=True)
-    except Exception:
-        pass
-    _exec_cursor_agent(cmd)
+        cmd = build_resume_command(chat_id, workspace_path=workspace_path, cursor_agent_path=cursor_agent_path)
+        cmd = _prepare_exec_command(cmd)
+        try:
+            ws = f" in {workspace_path}" if workspace_path is not None else ""
+            print(f"Launching cursor-agent{ws}… (resume {chat_id})", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        _exec_cursor_agent(cmd)
+    finally:
+        if old_cwd is not None:
+            try:
+                os.chdir(old_cwd)
+            except Exception:
+                pass
 
 
 def exec_new_chat(
@@ -372,14 +384,26 @@ def exec_new_chat(
     Similar to `exec_resume_chat`, we `chdir()` into the workspace to ensure the
     correct ~/.cursor/chats/<md5(cwd)> bucket is used.
     """
+    old_cwd: Optional[Path] = None
     if workspace_path is not None:
+        try:
+            old_cwd = Path.cwd()
+        except Exception:
+            old_cwd = None
         os.chdir(workspace_path)
-    cmd = build_new_command(workspace_path=workspace_path, cursor_agent_path=cursor_agent_path)
-    cmd = _prepare_exec_command(cmd)
     try:
-        ws = f" in {workspace_path}" if workspace_path is not None else ""
-        print(f"Launching cursor-agent{ws}…", file=sys.stderr, flush=True)
-    except Exception:
-        pass
-    _exec_cursor_agent(cmd)
+        cmd = build_new_command(workspace_path=workspace_path, cursor_agent_path=cursor_agent_path)
+        cmd = _prepare_exec_command(cmd)
+        try:
+            ws = f" in {workspace_path}" if workspace_path is not None else ""
+            print(f"Launching cursor-agent{ws}…", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+        _exec_cursor_agent(cmd)
+    finally:
+        if old_cwd is not None:
+            try:
+                os.chdir(old_cwd)
+            except Exception:
+                pass
 
