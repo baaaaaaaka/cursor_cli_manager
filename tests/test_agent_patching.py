@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from cursor_cli_manager.agent_paths import CursorAgentDirs
 from cursor_cli_manager.agent_patching import (
     ENV_CCM_CURSOR_AGENT_VERSIONS_DIR,
     ENV_CCM_PATCH_CURSOR_AGENT_MODELS,
@@ -12,6 +13,7 @@ from cursor_cli_manager.agent_patching import (
     resolve_cursor_agent_versions_dir,
     should_patch_models,
 )
+from cursor_cli_manager.ccm_config import CcmConfig, LEGACY_VERSION, save_ccm_config
 
 
 SAMPLE_JS = """
@@ -74,17 +76,34 @@ function getPermissions(teamSettingsService) {
 
 class TestAgentPatching(unittest.TestCase):
     def test_should_patch_models_env(self) -> None:
-        old = os.environ.get(ENV_CCM_PATCH_CURSOR_AGENT_MODELS)
-        try:
-            os.environ[ENV_CCM_PATCH_CURSOR_AGENT_MODELS] = "1"
-            self.assertTrue(should_patch_models(explicit=None))
-            os.environ[ENV_CCM_PATCH_CURSOR_AGENT_MODELS] = "0"
-            self.assertFalse(should_patch_models(explicit=None))
-        finally:
-            if old is None:
-                os.environ.pop(ENV_CCM_PATCH_CURSOR_AGENT_MODELS, None)
-            else:
-                os.environ[ENV_CCM_PATCH_CURSOR_AGENT_MODELS] = old
+        with tempfile.TemporaryDirectory() as td:
+            agent_dirs = CursorAgentDirs(Path(td) / "cursor_config")
+            save_ccm_config(agent_dirs, CcmConfig(installed_versions=[LEGACY_VERSION]))
+            old = os.environ.get(ENV_CCM_PATCH_CURSOR_AGENT_MODELS)
+            try:
+                os.environ[ENV_CCM_PATCH_CURSOR_AGENT_MODELS] = "1"
+                self.assertTrue(should_patch_models(agent_dirs=agent_dirs, explicit=None))
+                os.environ[ENV_CCM_PATCH_CURSOR_AGENT_MODELS] = "0"
+                self.assertFalse(should_patch_models(agent_dirs=agent_dirs, explicit=None))
+            finally:
+                if old is None:
+                    os.environ.pop(ENV_CCM_PATCH_CURSOR_AGENT_MODELS, None)
+                else:
+                    os.environ[ENV_CCM_PATCH_CURSOR_AGENT_MODELS] = old
+
+    def test_should_patch_models_requires_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            agent_dirs = CursorAgentDirs(Path(td) / "cursor_config")
+            old = os.environ.get(ENV_CCM_PATCH_CURSOR_AGENT_MODELS)
+            try:
+                os.environ[ENV_CCM_PATCH_CURSOR_AGENT_MODELS] = "1"
+                self.assertFalse(should_patch_models(agent_dirs=agent_dirs, explicit=None))
+                self.assertFalse(should_patch_models(agent_dirs=agent_dirs, explicit=True))
+            finally:
+                if old is None:
+                    os.environ.pop(ENV_CCM_PATCH_CURSOR_AGENT_MODELS, None)
+                else:
+                    os.environ[ENV_CCM_PATCH_CURSOR_AGENT_MODELS] = old
 
     def test_resolve_versions_dir_explicit_and_env(self) -> None:
         with tempfile.TemporaryDirectory() as td:

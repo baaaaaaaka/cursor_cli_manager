@@ -8,6 +8,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from cursor_cli_manager.agent_paths import CursorAgentDirs, get_cursor_agent_dirs
+from cursor_cli_manager.ccm_config import has_legacy_install
+
 
 ENV_CCM_PATCH_CURSOR_AGENT_MODELS = "CCM_PATCH_CURSOR_AGENT_MODELS"
 ENV_CCM_CURSOR_AGENT_VERSIONS_DIR = "CCM_CURSOR_AGENT_VERSIONS_DIR"
@@ -29,15 +32,23 @@ def _is_truthy(v: Optional[str]) -> bool:
     return v.strip().lower() in ("1", "true", "yes", "y", "on")
 
 
-def should_patch_models(*, explicit: Optional[bool] = None) -> bool:
+def should_patch_models(
+    *,
+    agent_dirs: Optional[CursorAgentDirs] = None,
+    explicit: Optional[bool] = None,
+) -> bool:
     """
     Decide whether to patch cursor-agent bundles (model enumeration + autoRunControls).
 
     Priority:
+    - legacy gate (must be enabled)
     - explicit arg (if not None)
     - $CCM_PATCH_CURSOR_AGENT_MODELS (if set; truthy/falsey)
     - default: True
     """
+    dirs = agent_dirs or get_cursor_agent_dirs()
+    if not has_legacy_install(dirs):
+        return False
     if explicit is not None:
         return bool(explicit)
     env = os.environ.get(ENV_CCM_PATCH_CURSOR_AGENT_MODELS)

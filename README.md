@@ -1,12 +1,26 @@
 # Cursor Agent Chat Manager (ccm)
 
+Install (recommended):
+
+macOS/Linux (binary):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/baaaaaaaka/cursor_cli_manager/main/scripts/install_ccm.sh | sh
+```
+
+Windows (pip + HTTPS):
+
+```bash
+pip3 install "cursor-cli-manager @ git+https://github.com/baaaaaaaka/cursor_cli_manager@main"
+```
+
 `ccm` is a terminal UI manager for **`cursor-agent`** (or cursor cli) chats (terminal-only). It helps you:
 
 - Discover folders that have **cursor-agent chat sessions**
 - Browse folders + sessions in a responsive **TUI** with a **preview pane** (message history)
 - Resume a selected session via **`cursor-agent --resume <chatId>`**
 
-This project targets **macOS** and **Linux**.
+This project targets **macOS** and **Linux**, with best-effort Windows support.
 
 ## Requirements
 
@@ -16,11 +30,9 @@ This project targets **macOS** and **Linux**.
 
 ## Install
 
-### One-line install (GitHub Releases binary)
+### macOS/Linux: one-line install (GitHub Releases binary)
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/baaaaaaaka/cursor_cli_manager/main/scripts/install_ccm.sh | sh
-```
+Use the one-line install above. It will:
 
 This will:
 
@@ -32,7 +44,7 @@ This will:
 Tip: for stability/security, pin the installer to a tag (or commit SHA):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/baaaaaaaka/cursor_cli_manager/v0.6.8/scripts/install_ccm.sh | sh
+curl -fsSL https://raw.githubusercontent.com/baaaaaaaka/cursor_cli_manager/v0.7.0/scripts/install_ccm.sh | sh
 ```
 
 Notes:
@@ -46,13 +58,11 @@ After installing:
 - If installed via **binary**, you will have `ccm` and `cursor-cli-manager`
 - If installed via **pip**, you will have `ccm` and `cursor-cli-manager`
 
-### From Git (recommended)
+### Windows: pip install from Git (HTTPS)
+
+To pin to a commit:
 
 ```bash
-# HTTPS (recommended)
-pip3 install "cursor-cli-manager @ git+https://github.com/baaaaaaaka/cursor_cli_manager@main"
-
-# or pin to a commit:
 pip3 install "cursor-cli-manager @ git+https://github.com/baaaaaaaka/cursor_cli_manager.git@<commit_sha>"
 ```
 
@@ -129,16 +139,7 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 - `CURSOR_AGENT_PATH`: override the `cursor-agent` executable path
 - `CURSOR_AGENT_CONFIG_DIR`: override the config dir (default: `~/.cursor`)
 - `--config-dir <dir>`: override the config dir (same effect as `CURSOR_AGENT_CONFIG_DIR`)
-- `CCM_PATCH_CURSOR_AGENT_MODELS=1`: patch cursor-agent bundles before launching so `/model` / `--list-models` prefer "AvailableModels" (best-effort)
 - `CCM_GITHUB_REPO=owner/name`: override the GitHub repo used by `ccm upgrade` for GitHub-release binaries
-- `CCM_CURSOR_AGENT_VERSIONS_DIR`: override the cursor-agent `versions/` directory (used for model patching)
-- `CURSOR_AGENT_VERSIONS_DIR`: same as above (fallback)
-
-You can also run the patch explicitly:
-
-```bash
-ccm patch-models
-```
 
 ## Versioning policy
 

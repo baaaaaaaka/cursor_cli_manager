@@ -8,6 +8,8 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
+from cursor_cli_manager.agent_paths import CursorAgentDirs
+from cursor_cli_manager.ccm_config import CcmConfig, LEGACY_VERSION, save_ccm_config
 from cursor_cli_manager.opening import (
     ENV_CURSOR_AGENT_PATH,
     DEFAULT_CURSOR_AGENT_FLAGS,
@@ -45,12 +47,16 @@ class TestOpening(unittest.TestCase):
 
     def test_build_resume_command(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            agent = Path(td) / "cursor-agent"
+            td_path = Path(td)
+            agent = td_path / "cursor-agent"
             agent.write_text("x", encoding="utf-8")
+            agent_dirs = CursorAgentDirs(td_path / "cursor_config")
+            save_ccm_config(agent_dirs, CcmConfig(installed_versions=[LEGACY_VERSION]))
             cmd = build_resume_command(
                 "abc123",
                 workspace_path=Path("/tmp/ws"),
                 cursor_agent_path=str(agent),
+                agent_dirs=agent_dirs,
             )
             self.assertEqual(cmd[0], str(agent))
             self.assertIn("--resume", cmd)
@@ -60,9 +66,16 @@ class TestOpening(unittest.TestCase):
 
     def test_build_new_command(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            agent = Path(td) / "cursor-agent"
+            td_path = Path(td)
+            agent = td_path / "cursor-agent"
             agent.write_text("x", encoding="utf-8")
-            cmd = build_new_command(workspace_path=Path("/tmp/ws"), cursor_agent_path=str(agent))
+            agent_dirs = CursorAgentDirs(td_path / "cursor_config")
+            save_ccm_config(agent_dirs, CcmConfig(installed_versions=[LEGACY_VERSION]))
+            cmd = build_new_command(
+                workspace_path=Path("/tmp/ws"),
+                cursor_agent_path=str(agent),
+                agent_dirs=agent_dirs,
+            )
             self.assertEqual(cmd[0], str(agent))
             self.assertNotIn("--resume", cmd)
             self.assertIn("--workspace", cmd)
@@ -80,9 +93,17 @@ class TestOpening(unittest.TestCase):
             opening._PROBED_CURSOR_AGENT_FLAGS = ["--browser"]
 
             with tempfile.TemporaryDirectory() as td:
-                agent = Path(td) / "cursor-agent"
+                td_path = Path(td)
+                agent = td_path / "cursor-agent"
                 agent.write_text("x", encoding="utf-8")
-                cmd = build_resume_command("abc123", workspace_path=Path("/tmp/ws"), cursor_agent_path=str(agent))
+                agent_dirs = CursorAgentDirs(td_path / "cursor_config")
+                save_ccm_config(agent_dirs, CcmConfig(installed_versions=[LEGACY_VERSION]))
+                cmd = build_resume_command(
+                    "abc123",
+                    workspace_path=Path("/tmp/ws"),
+                    cursor_agent_path=str(agent),
+                    agent_dirs=agent_dirs,
+                )
                 self.assertIn("--browser", cmd)
                 self.assertNotIn("--approve-mcps", cmd)
                 self.assertNotIn("--force", cmd)
@@ -101,8 +122,11 @@ class TestOpening(unittest.TestCase):
             return 0, " --browser \n --approve-mcps \n", ""
 
         with tempfile.TemporaryDirectory() as td:
-            agent = Path(td) / "cursor-agent"
+            td_path = Path(td)
+            agent = td_path / "cursor-agent"
             agent.write_text("x", encoding="utf-8")
+            agent_dirs = CursorAgentDirs(td_path / "cursor_config")
+            save_ccm_config(agent_dirs, CcmConfig(installed_versions=[LEGACY_VERSION]))
             with patch("cursor_cli_manager.opening.resolve_cursor_agent_path", return_value=str(agent)), patch(
                 "cursor_cli_manager.opening._default_runner", side_effect=fake_runner
             ):
@@ -117,7 +141,10 @@ class TestOpening(unittest.TestCase):
                     self.assertLess(time.monotonic() - t0, 0.2)
 
                     # Must not block even though probe is still running.
-                    self.assertEqual(get_cursor_agent_flags(), DEFAULT_CURSOR_AGENT_FLAGS)
+                    self.assertEqual(
+                        get_cursor_agent_flags(agent_dirs=agent_dirs),
+                        DEFAULT_CURSOR_AGENT_FLAGS,
+                    )
                 finally:
                     evt.set()
                     t_wait = time.monotonic()
@@ -125,6 +152,11 @@ class TestOpening(unittest.TestCase):
                         time.sleep(0.01)
                     opening._PROBE_STARTED = old_started
                     opening._PROBED_CURSOR_AGENT_FLAGS = old_probed
+
+    def test_get_cursor_agent_flags_empty_without_legacy(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            agent_dirs = CursorAgentDirs(Path(td) / "cursor_config")
+            self.assertEqual(get_cursor_agent_flags(agent_dirs=agent_dirs), [])
 
     def test_prepare_exec_command_drops_force_when_unsupported(self) -> None:
         import cursor_cli_manager.opening as opening

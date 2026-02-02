@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from cursor_cli_manager.update import _default_runner
+from cursor_cli_manager.agent_paths import CursorAgentDirs, get_cursor_agent_dirs
+from cursor_cli_manager.ccm_config import has_legacy_install
 
 
 ENV_CURSOR_AGENT_PATH = "CURSOR_AGENT_PATH"
@@ -132,10 +134,13 @@ def start_cursor_agent_flag_probe(*, timeout_s: float = 1.0) -> None:
     threading.Thread(target=_run, daemon=True).start()
 
 
-def get_cursor_agent_flags() -> List[str]:
+def get_cursor_agent_flags(*, agent_dirs: Optional[CursorAgentDirs] = None) -> List[str]:
     """
     Optional flags to pass to cursor-agent (best-effort).
     """
+    dirs = agent_dirs or get_cursor_agent_dirs()
+    if not has_legacy_install(dirs):
+        return []
     probed = _PROBED_CURSOR_AGENT_FLAGS
     return list(probed) if probed is not None else list(DEFAULT_CURSOR_AGENT_FLAGS)
 
@@ -300,6 +305,7 @@ def build_resume_command(
     *,
     workspace_path: Optional[Path] = None,
     cursor_agent_path: Optional[str] = None,
+    agent_dirs: Optional[CursorAgentDirs] = None,
 ) -> List[str]:
     agent = resolve_cursor_agent_path(cursor_agent_path)
     if not agent:
@@ -308,7 +314,7 @@ def build_resume_command(
     cmd: List[str] = [agent]
     if workspace_path is not None:
         cmd.extend(["--workspace", str(workspace_path)])
-    cmd.extend(get_cursor_agent_flags())
+    cmd.extend(get_cursor_agent_flags(agent_dirs=agent_dirs))
     cmd.extend(["--resume", chat_id])
     return cmd
 
@@ -317,6 +323,7 @@ def build_new_command(
     *,
     workspace_path: Optional[Path] = None,
     cursor_agent_path: Optional[str] = None,
+    agent_dirs: Optional[CursorAgentDirs] = None,
 ) -> List[str]:
     """
     Build a command that starts a new cursor-agent chat session.
@@ -328,7 +335,7 @@ def build_new_command(
     cmd: List[str] = [agent]
     if workspace_path is not None:
         cmd.extend(["--workspace", str(workspace_path)])
-    cmd.extend(get_cursor_agent_flags())
+    cmd.extend(get_cursor_agent_flags(agent_dirs=agent_dirs))
     return cmd
 
 
@@ -341,6 +348,7 @@ def exec_resume_chat(
     *,
     workspace_path: Optional[Path],
     cursor_agent_path: Optional[str] = None,
+    agent_dirs: Optional[CursorAgentDirs] = None,
 ) -> "os.NoReturn":
     """
     Exec into cursor-agent and resume a chat session.
@@ -357,7 +365,12 @@ def exec_resume_chat(
             old_cwd = None
         os.chdir(workspace_path)
     try:
-        cmd = build_resume_command(chat_id, workspace_path=workspace_path, cursor_agent_path=cursor_agent_path)
+        cmd = build_resume_command(
+            chat_id,
+            workspace_path=workspace_path,
+            cursor_agent_path=cursor_agent_path,
+            agent_dirs=agent_dirs,
+        )
         cmd = _prepare_exec_command(cmd)
         try:
             ws = f" in {workspace_path}" if workspace_path is not None else ""
@@ -377,6 +390,7 @@ def exec_new_chat(
     *,
     workspace_path: Optional[Path],
     cursor_agent_path: Optional[str] = None,
+    agent_dirs: Optional[CursorAgentDirs] = None,
 ) -> "os.NoReturn":
     """
     Exec into cursor-agent and start a new chat session.
@@ -392,7 +406,11 @@ def exec_new_chat(
             old_cwd = None
         os.chdir(workspace_path)
     try:
-        cmd = build_new_command(workspace_path=workspace_path, cursor_agent_path=cursor_agent_path)
+        cmd = build_new_command(
+            workspace_path=workspace_path,
+            cursor_agent_path=cursor_agent_path,
+            agent_dirs=agent_dirs,
+        )
         cmd = _prepare_exec_command(cmd)
         try:
             ws = f" in {workspace_path}" if workspace_path is not None else ""

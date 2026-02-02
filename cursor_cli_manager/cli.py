@@ -15,6 +15,7 @@ if sys.platform.startswith("win"):
 
 import curses
 
+from cursor_cli_manager import __version__
 from cursor_cli_manager.agent_discovery import discover_agent_chats, discover_agent_workspaces
 from cursor_cli_manager.agent_paths import (
     ENV_CURSOR_AGENT_CONFIG_DIR,
@@ -25,6 +26,7 @@ from cursor_cli_manager.agent_paths import (
 from cursor_cli_manager.agent_store import extract_recent_messages, format_messages_preview
 from cursor_cli_manager.models import AgentChat, AgentWorkspace
 from cursor_cli_manager.agent_store import extract_initial_messages
+from cursor_cli_manager.ccm_config import has_legacy_install, record_installed_version
 from cursor_cli_manager.opening import (
     build_resume_command,
     exec_new_chat,
@@ -110,12 +112,15 @@ def cmd_doctor(agent_dirs: CursorAgentDirs) -> int:
     vdir = resolve_cursor_agent_versions_dir(cursor_agent_path=agent)
     print(f"- versions dir: {vdir or 'NOT FOUND'}")
     if vdir is not None:
-        # Doctor should not modify anything; just report best-effort patchability.
-        rep = patch_cursor_agent_models(versions_dir=vdir, dry_run=True)
-        print(
-            f"- model patch dry-run: would_patch={len(rep.patched_files)} already_patched={rep.skipped_already_patched} "
-            f"not_applicable={rep.skipped_not_applicable} errors={len(rep.errors)}"
-        )
+        if has_legacy_install(agent_dirs):
+            # Doctor should not modify anything; just report best-effort patchability.
+            rep = patch_cursor_agent_models(versions_dir=vdir, dry_run=True)
+            print(
+                f"- model patch dry-run: would_patch={len(rep.patched_files)} already_patched={rep.skipped_already_patched} "
+                f"not_applicable={rep.skipped_not_applicable} errors={len(rep.errors)}"
+            )
+        else:
+            print("- model patch dry-run: disabled (no legacy history)")
 
     try:
         workspaces = discover_agent_workspaces(agent_dirs)
@@ -164,12 +169,12 @@ def cmd_open(
         )
         if vdir is not None:
             patch_cursor_agent_models(versions_dir=vdir, dry_run=False, force=force_patch_models)
-    cmd = build_resume_command(chat_id, workspace_path=workspace_path)
+    cmd = build_resume_command(chat_id, workspace_path=workspace_path, agent_dirs=agent_dirs)
     if dry_run:
         # Display as a shell-friendly snippet.
         print(f"cd {workspace_path} && " + " ".join(cmd))
         return 0
-    exec_resume_chat(chat_id, workspace_path=workspace_path)
+    exec_resume_chat(chat_id, workspace_path=workspace_path, agent_dirs=agent_dirs)
     return 0  # unreachable
 
 
@@ -370,7 +375,8 @@ def cmd_tui(
         print(f"Auto-upgrade to {preferred_asset} failed; continuing.", file=sys.stderr)
 
     # Non-blocking: probe cursor-agent optional flags in background while the user browses the TUI.
-    start_cursor_agent_flag_probe()
+    if has_legacy_install(agent_dirs):
+        start_cursor_agent_flag_probe()
     if patch_models:
         vdir = resolve_cursor_agent_versions_dir(
             explicit=cursor_agent_versions_dir,
@@ -437,9 +443,9 @@ def cmd_tui(
         print("Tip: run the manager from that folder so the workspace can be identified.")
         return 1
     if chat is None:
-        exec_new_chat(workspace_path=ws.workspace_path)
+        exec_new_chat(workspace_path=ws.workspace_path, agent_dirs=agent_dirs)
         return 0  # unreachable
-    exec_resume_chat(chat.chat_id, workspace_path=ws.workspace_path)
+    exec_resume_chat(chat.chat_id, workspace_path=ws.workspace_path, agent_dirs=agent_dirs)
     return 0  # unreachable
 
 
@@ -514,6 +520,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         agent_dirs = get_cursor_agent_dirs()
 
+    record_installed_version(agent_dirs, __version__)
+
     # Auto-learn mapping from md5(cwd) -> cwd path for better workspace naming.
     try_learn_current_cwd(agent_dirs)
 
@@ -521,7 +529,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     if cmd == "tui":
         return cmd_tui(
             agent_dirs,
-            patch_models=should_patch_models(explicit=getattr(args, "patch_models", None)),
+            patch_models=should_patch_models(
+                agent_dirs=agent_dirs,
+                explicit=getattr(args, "patch_models", None),
+            ),
             cursor_agent_versions_dir=getattr(args, "cursor_agent_versions_dir", None),
             force_patch_models=bool(getattr(args, "force_patch_models", False)),
         )
@@ -536,11 +547,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             args.chat_id,
             workspace_path=ws_path,
             dry_run=bool(args.dry_run),
-            patch_models=should_patch_models(explicit=getattr(args, "patch_models", None)),
+            patch_models=should_patch_models(
+                agent_dirs=agent_dirs,
+                explicit=getattr(args, "patch_models", None),
+            ),
             cursor_agent_versions_dir=getattr(args, "cursor_agent_versions_dir", None),
             force_patch_models=bool(getattr(args, "force_patch_models", False)),
         )
     if cmd == "patch-models":
+        if not has_legacy_install(agent_dirs):
+            return 0
         vdir = resolve_cursor_agent_versions_dir(
             explicit=getattr(args, "cursor_agent_versions_dir", None),
             cursor_agent_path=resolve_cursor_agent_path(),
