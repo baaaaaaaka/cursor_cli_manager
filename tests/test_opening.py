@@ -445,6 +445,34 @@ class TestOpening(unittest.TestCase):
         self.assertEqual(cm.exception.code, 7)
         run_interactive.assert_called_once_with(cmd)
 
+    def test_should_use_windows_interactive_runner_only_for_windows_targets(self) -> None:
+        import cursor_cli_manager.opening as opening
+
+        with patch("cursor_cli_manager.opening.sys.platform", "win32"):
+            self.assertTrue(
+                opening._should_use_windows_interactive_runner(["C:\\\\Users\\\\baka\\\\AppData\\\\Local\\\\cursor-agent\\\\cursor-agent.CMD"])
+            )
+            self.assertTrue(opening._should_use_windows_interactive_runner(["cursor-agent"]))
+            self.assertFalse(opening._should_use_windows_interactive_runner(["/tmp/cursor-agent"]))
+            self.assertFalse(opening._should_use_windows_interactive_runner([]))
+
+    def test_run_cursor_agent_interactive_wraps_cmd_via_cmd_exe_on_windows(self) -> None:
+        import cursor_cli_manager.opening as opening
+
+        proc = unittest.mock.Mock()
+        proc.wait.return_value = 0
+        with patch("cursor_cli_manager.opening.sys.platform", "win32"), patch(
+            "cursor_cli_manager.opening.subprocess.Popen", return_value=proc
+        ) as popen:
+            rc = opening._run_cursor_agent_interactive(
+                ["C:\\\\Users\\\\baka\\\\AppData\\\\Local\\\\cursor-agent\\\\cursor-agent.CMD", "--workspace", "C:\\\\tmp"]
+            )
+
+        self.assertEqual(rc, 0)
+        popen_args = popen.call_args[0][0]
+        self.assertEqual(popen_args[0].lower(), "cmd.exe")
+        self.assertIn("/c", [x.lower() for x in popen_args])
+
     def test_run_cursor_agent_interactive_forwards_sigint_on_keyboard_interrupt(self) -> None:
         import cursor_cli_manager.opening as opening
 

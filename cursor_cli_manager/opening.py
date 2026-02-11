@@ -249,8 +249,15 @@ def _run_cursor_agent_interactive(cmd: List[str]) -> int:
     This is used on Windows to avoid `os.execvp` behavior differences for
     `.cmd` wrappers while keeping interactive stdin/stdout/stderr semantics.
     """
+    popen_cmd = list(cmd)
+    if sys.platform.startswith("win") and cmd:
+        target = str(cmd[0])
+        suffix = Path(target).suffix.lower()
+        if suffix in (".cmd", ".bat"):
+            popen_cmd = ["cmd.exe", "/d", "/s", "/c", subprocess.list2cmdline(list(cmd))]
+
     p = subprocess.Popen(
-        list(cmd),
+        popen_cmd,
         stdin=None,
         stdout=None,
         stderr=None,
@@ -267,13 +274,30 @@ def _run_cursor_agent_interactive(cmd: List[str]) -> int:
 
 
 def _exec_or_run_cursor_agent(cmd: List[str]) -> "os.NoReturn":
-    if sys.platform.startswith("win"):
+    if _should_use_windows_interactive_runner(cmd):
         raise SystemExit(_run_cursor_agent_interactive(cmd))
     os.execvp(cmd[0], cmd)
 
 
+def _should_use_windows_interactive_runner(cmd: List[str]) -> bool:
+    if not sys.platform.startswith("win"):
+        return False
+    if not cmd:
+        return False
+    target = str(cmd[0]).strip()
+    if not target:
+        return False
+    suffix = Path(target).suffix.lower()
+    if suffix in (".exe", ".cmd", ".bat", ".com", ".ps1"):
+        return True
+    # Plain command names (resolved by PATHEXT/PATH) are also acceptable.
+    if suffix == "" and ("\\" not in target and "/" not in target):
+        return True
+    return False
+
+
 def _exec_cursor_agent(cmd: List[str]) -> "os.NoReturn":
-    if sys.platform.startswith("win"):
+    if _should_use_windows_interactive_runner(cmd):
         # Keep all flags (including --force), but avoid Windows-specific
         # `os.execvp` quirks for interactive cursor-agent sessions.
         _exec_or_run_cursor_agent(cmd)
