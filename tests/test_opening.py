@@ -1,9 +1,12 @@
 import os
+import json
 import tempfile
 import threading
 import time
 import unittest
 import io
+import subprocess
+import sys
 from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
@@ -483,6 +486,114 @@ class TestOpening(unittest.TestCase):
 
         self.assertEqual(rc, 5)
         proc.send_signal.assert_called_once_with(opening.signal.SIGINT)
+
+    @unittest.skipUnless(sys.platform.startswith("win"), "Windows-only integration test.")
+    def test_exec_new_chat_windows_cmd_powershell_wrapper_preserves_stdin(self) -> None:
+        # Exercise a real Windows wrapper chain:
+        # cursor-agent.CMD -> cursor-agent.ps1 -> python helper
+        # to catch regressions where chat launch works but interactive input does not.
+        repo_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            ws = td_path / "ws"
+            ws.mkdir(parents=True, exist_ok=True)
+
+            payload_py = td_path / "agent_payload.py"
+            payload_py.write_text(
+                """import json
+import os
+import sys
+from pathlib import Path
+
+line = sys.stdin.readline().rstrip("\\r\\n")
+payload = {
+    "argv": sys.argv[1:],
+    "stdin_line": line,
+}
+Path(os.environ["CCM_OPENING_TEST_OUTPUT"]).write_text(json.dumps(payload), encoding="utf-8")
+print(f"probe-stdin:{line}", flush=True)
+""",
+                encoding="utf-8",
+            )
+
+            ps1 = td_path / "cursor-agent.ps1"
+            ps1.write_text(
+                """& "$env:CCM_TEST_PYTHON" "$env:CCM_TEST_AGENT_SCRIPT" @args
+exit $LASTEXITCODE
+""",
+                encoding="utf-8",
+            )
+
+            cmd = td_path / "cursor-agent.CMD"
+            cmd.write_text(
+                "@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%~dp0cursor-agent.ps1\" %*\r\n",
+                encoding="utf-8",
+            )
+
+            driver_py = td_path / "driver.py"
+            driver_py.write_text(
+                """import sys
+from pathlib import Path
+
+from cursor_cli_manager.agent_paths import CursorAgentDirs
+from cursor_cli_manager.opening import exec_new_chat
+
+ws = Path(sys.argv[1])
+agent = sys.argv[2]
+cfg = Path(sys.argv[3])
+marker = Path(sys.argv[4])
+try:
+    exec_new_chat(workspace_path=ws, cursor_agent_path=agent, agent_dirs=CursorAgentDirs(cfg))
+except SystemExit as exc:
+    marker.write_text(f"systemexit:{exc.code}", encoding="utf-8")
+    raise
+marker.write_text("returned", encoding="utf-8")
+""",
+                encoding="utf-8",
+            )
+
+            out_json = td_path / "probe.json"
+            marker = td_path / "driver.marker"
+
+            agent_dirs = CursorAgentDirs(td_path / "cursor_config")
+            save_ccm_config(agent_dirs, CcmConfig(installed_versions=[LEGACY_VERSION]))
+
+            env = dict(os.environ)
+            env["CCM_TEST_PYTHON"] = sys.executable
+            env["CCM_TEST_AGENT_SCRIPT"] = str(payload_py)
+            env["CCM_OPENING_TEST_OUTPUT"] = str(out_json)
+            env["PYTHONPATH"] = str(repo_root) + (
+                os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
+            )
+
+            proc = subprocess.run(
+                [sys.executable, str(driver_py), str(ws), str(cmd), str(agent_dirs.config_dir), str(marker)],
+                input="hello-from-stdin\n",
+                text=True,
+                capture_output=True,
+                timeout=30,
+                env=env,
+            )
+
+            self.assertEqual(
+                proc.returncode,
+                0,
+                msg=f"driver failed\nstdout:\n{proc.stdout}\n\nstderr:\n{proc.stderr}",
+            )
+            self.assertTrue(marker.exists(), msg=f"missing marker file; stderr:\n{proc.stderr}")
+            self.assertEqual(marker.read_text(encoding="utf-8").strip(), "systemexit:0")
+
+            self.assertTrue(out_json.exists(), msg=f"missing payload output; stderr:\n{proc.stderr}")
+            payload = json.loads(out_json.read_text(encoding="utf-8"))
+            argv = payload.get("argv", [])
+
+            self.assertEqual(payload.get("stdin_line"), "hello-from-stdin")
+            self.assertIn("--workspace", argv)
+            self.assertIn(str(ws), argv)
+            self.assertIn("--approve-mcps", argv)
+            self.assertIn("--browser", argv)
+            self.assertIn("--force", argv)
+            self.assertIn("probe-stdin:hello-from-stdin", proc.stdout)
 
 
 if __name__ == "__main__":
