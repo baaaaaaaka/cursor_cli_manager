@@ -242,7 +242,41 @@ def _run_cursor_agent(cmd: List[str]) -> Tuple[int, str]:
     return rc or 0, "".join(stderr_chunks)
 
 
+def _run_cursor_agent_interactive(cmd: List[str]) -> int:
+    """
+    Run cursor-agent attached to the current terminal.
+
+    This is used on Windows to avoid `os.execvp` behavior differences for
+    `.cmd` wrappers while keeping interactive stdin/stdout/stderr semantics.
+    """
+    p = subprocess.Popen(
+        list(cmd),
+        stdin=None,
+        stdout=None,
+        stderr=None,
+    )
+    try:
+        rc = p.wait()
+    except KeyboardInterrupt:
+        try:
+            p.send_signal(signal.SIGINT)
+        except Exception:
+            pass
+        rc = p.wait()
+    return rc or 0
+
+
+def _exec_or_run_cursor_agent(cmd: List[str]) -> "os.NoReturn":
+    if sys.platform.startswith("win"):
+        raise SystemExit(_run_cursor_agent_interactive(cmd))
+    os.execvp(cmd[0], cmd)
+
+
 def _exec_cursor_agent(cmd: List[str]) -> "os.NoReturn":
+    if sys.platform.startswith("win"):
+        # Keep all flags (including --force), but avoid Windows-specific
+        # `os.execvp` quirks for interactive cursor-agent sessions.
+        _exec_or_run_cursor_agent(cmd)
     if "--force" in cmd or "-f" in cmd:
         retry_cmd = list(cmd)
         while True:
@@ -255,7 +289,7 @@ def _exec_cursor_agent(cmd: List[str]) -> "os.NoReturn":
                     print(_FORCE_DISABLED_RETRY_MESSAGE, file=sys.stderr, flush=True)
                 except Exception:
                     pass
-                os.execvp(retry_cmd[0], retry_cmd)
+                _exec_or_run_cursor_agent(retry_cmd)
             bad_flag = _extract_unknown_option(err)
             if bad_flag and bad_flag in DEFAULT_CURSOR_AGENT_FLAGS and _command_contains_flag(retry_cmd, bad_flag):
                 retry_cmd = _remove_flag_from_cmd(retry_cmd, bad_flag)
@@ -264,10 +298,10 @@ def _exec_cursor_agent(cmd: List[str]) -> "os.NoReturn":
                 except Exception:
                     pass
                 if "--force" not in retry_cmd and "-f" not in retry_cmd:
-                    os.execvp(retry_cmd[0], retry_cmd)
+                    _exec_or_run_cursor_agent(retry_cmd)
                 continue
             raise SystemExit(rc)
-    os.execvp(cmd[0], cmd)
+    _exec_or_run_cursor_agent(cmd)
 
 
 def resolve_cursor_agent_path(explicit: Optional[str] = None) -> Optional[str]:
@@ -340,7 +374,7 @@ def build_new_command(
 
 
 def exec_resume_command(cmd: List[str]) -> "os.NoReturn":
-    os.execvp(cmd[0], cmd)
+    _exec_or_run_cursor_agent(cmd)
 
 
 def exec_resume_chat(

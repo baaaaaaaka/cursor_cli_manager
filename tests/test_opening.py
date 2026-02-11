@@ -405,6 +405,57 @@ class TestOpening(unittest.TestCase):
             self.assertIn("--approve-mcps", calls[1])
             self.assertNotIn("--approve-mcps", calls[2])
 
+    def test_exec_new_chat_windows_uses_interactive_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            ws = td_path / "ws"
+            ws.mkdir(parents=True, exist_ok=True)
+            agent = td_path / "cursor-agent.cmd"
+            agent.write_text("@echo off\r\n", encoding="utf-8")
+
+            with patch("cursor_cli_manager.opening.sys.platform", "win32"), patch(
+                "cursor_cli_manager.opening.get_cursor_agent_flags", return_value=DEFAULT_CURSOR_AGENT_FLAGS
+            ), patch("cursor_cli_manager.opening._supports_optional_flag", return_value=True), patch(
+                "cursor_cli_manager.opening._run_cursor_agent_interactive", return_value=0
+            ) as run_interactive, patch(
+                "cursor_cli_manager.opening.os.execvp", side_effect=AssertionError("execvp should not be called on Windows")
+            ):
+                with self.assertRaises(SystemExit) as cm:
+                    exec_new_chat(workspace_path=ws, cursor_agent_path=str(agent))
+
+            self.assertEqual(cm.exception.code, 0)
+            self.assertEqual(run_interactive.call_count, 1)
+            called_cmd = run_interactive.call_args[0][0]
+            self.assertIn("--force", called_cmd)
+            self.assertIn("--approve-mcps", called_cmd)
+            self.assertIn("--browser", called_cmd)
+
+    def test_exec_resume_command_windows_uses_interactive_runner(self) -> None:
+        import cursor_cli_manager.opening as opening
+
+        cmd = ["C:\\\\Users\\\\baka\\\\AppData\\\\Local\\\\cursor-agent\\\\cursor-agent.CMD", "--workspace", "C:\\\\tmp"]
+        with patch("cursor_cli_manager.opening.sys.platform", "win32"), patch(
+            "cursor_cli_manager.opening._run_cursor_agent_interactive", return_value=7
+        ) as run_interactive, patch(
+            "cursor_cli_manager.opening.os.execvp", side_effect=AssertionError("execvp should not be called on Windows")
+        ):
+            with self.assertRaises(SystemExit) as cm:
+                opening.exec_resume_command(cmd)
+
+        self.assertEqual(cm.exception.code, 7)
+        run_interactive.assert_called_once_with(cmd)
+
+    def test_run_cursor_agent_interactive_forwards_sigint_on_keyboard_interrupt(self) -> None:
+        import cursor_cli_manager.opening as opening
+
+        proc = unittest.mock.Mock()
+        proc.wait.side_effect = [KeyboardInterrupt(), 5]
+        with patch("cursor_cli_manager.opening.subprocess.Popen", return_value=proc):
+            rc = opening._run_cursor_agent_interactive(["cursor-agent", "--workspace", "/tmp"])
+
+        self.assertEqual(rc, 5)
+        proc.send_signal.assert_called_once_with(opening.signal.SIGINT)
+
 
 if __name__ == "__main__":
     unittest.main()
