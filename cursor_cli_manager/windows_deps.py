@@ -113,7 +113,11 @@ def _ripgrep_arch_suffix() -> Optional[str]:
 
 def _fetch_ripgrep_asset(arch_suffix: str) -> Optional[Tuple[str, str]]:
     try:
-        req = urllib.request.Request(_RIPGREP_API_URL, headers={"User-Agent": "ccm"})
+        headers = {"User-Agent": "ccm"}
+        gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+        if gh_token:
+            headers["Authorization"] = f"token {gh_token}"
+        req = urllib.request.Request(_RIPGREP_API_URL, headers=headers)
         with urllib.request.urlopen(req, timeout=_RIPGREP_TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
     except Exception as e:
