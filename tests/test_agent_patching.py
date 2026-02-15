@@ -332,11 +332,17 @@ class TestAgentPatching(unittest.TestCase):
             rep = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False)
             self.assertTrue(rep.ok)
             self.assertEqual(len(rep.patched_files), 1)
+            self.assertEqual(len(rep.repaired_files), 1)
+            self.assertEqual(rep.repaired_files[0], js)
 
             patched = js.read_text(encoding="utf-8")
             self.assertIn("Promise.resolve({ enabled: false })", patched)
             # The old non-Promise pattern must not appear (except as part of Promise.resolve).
             self.assertNotIn("yield ({ enabled: false })", patched)
+
+            # Second run: already fixed, no more repairs.
+            rep2 = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False)
+            self.assertEqual(len(rep2.repaired_files), 0)
 
     def test_patch_autorun_catch_chain_safe(self) -> None:
         """Replacement must be .catch()-safe for non-yielded call sites."""

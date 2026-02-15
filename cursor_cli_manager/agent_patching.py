@@ -247,6 +247,7 @@ class PatchReport:
     versions_dir: Path
     scanned_files: int = 0
     patched_files: List[Path] = field(default_factory=list)
+    repaired_files: List[Path] = field(default_factory=list)
     skipped_already_patched: int = 0
     skipped_not_applicable: int = 0
     skipped_cached: int = 0
@@ -272,12 +273,15 @@ _RE_AUTORUN_CONTROLS_CALL = re.compile(
 )
 
 
-def _patch_auto_run_controls(txt: str) -> Tuple[str, int]:
+def _patch_auto_run_controls(txt: str) -> Tuple[str, int, int]:
     """
     Replace any single-line `const autoRunControls = ...` assignment with `const autoRunControls = null`.
     Also force getAutoRunControls() calls to return a permissive object.
 
     This is best-effort and intentionally avoids touching lines already set to `null`.
+
+    Returns ``(new_text, n_changed, n_repaired)`` where *n_repaired* counts
+    sites upgraded from the old non-Promise replacement that broke ``.catch()`` chains.
     """
     out, n_assign = _RE_AUTORUN_CONTROLS_ASSIGN.subn("const autoRunControls = null", txt)
     replacement = "Promise.resolve({ enabled: false })/* " + _PATCH_AUTORUN_MARKER + " */"
@@ -286,11 +290,11 @@ def _patch_auto_run_controls(txt: str) -> Tuple[str, int]:
     # Upgrade old patches that returned a plain object instead of a Promise.
     # The old replacement broke code like `getAutoRunControls().catch(...)`.
     _OLD_BROKEN = "({ enabled: false })/* " + _PATCH_AUTORUN_MARKER + " */"
-    n_upgrade = out.count(_OLD_BROKEN)
-    if n_upgrade:
+    n_repair = out.count(_OLD_BROKEN)
+    if n_repair:
         out = out.replace(_OLD_BROKEN, replacement)
 
-    return out, n_assign + n_call + n_upgrade
+    return out, n_assign + n_call + n_repair, n_repair
 
 def _extract_call_arg(block: str) -> Optional[str]:
     """
@@ -510,11 +514,14 @@ def patch_cursor_agent_models(
                 or _RE_AUTORUN_CONTROLS_CALL.search(new_txt) is not None
                 or _PATCH_AUTORUN_MARKER in new_txt
             )
+            repaired = False
             if auto_found:
-                new_txt2, n_auto = _patch_auto_run_controls(new_txt)
+                new_txt2, n_auto, n_repair = _patch_auto_run_controls(new_txt)
                 if n_auto and new_txt2 != new_txt:
                     new_txt = new_txt2
                     changed = True
+                    if n_repair:
+                        repaired = True
 
             if not changed:
                 status = _PATCH_CACHE_STATUS_NOT_APPLICABLE
@@ -537,6 +544,8 @@ def patch_cursor_agent_models(
 
             if dry_run:
                 rep.patched_files.append(p)
+                if repaired:
+                    rep.repaired_files.append(p)
                 continue
 
             if st is None:
@@ -567,6 +576,8 @@ def patch_cursor_agent_models(
                     except Exception:
                         pass
                 rep.patched_files.append(p)
+                if repaired:
+                    rep.repaired_files.append(p)
                 if new_cache is not None:
                     try:
                         st_after = p.stat()

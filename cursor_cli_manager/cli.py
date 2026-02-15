@@ -115,8 +115,9 @@ def cmd_doctor(agent_dirs: CursorAgentDirs) -> int:
         if has_legacy_install(agent_dirs):
             # Doctor should not modify anything; just report best-effort patchability.
             rep = patch_cursor_agent_models(versions_dir=vdir, dry_run=True)
+            repair_note = f" would_repair={len(rep.repaired_files)}" if rep.repaired_files else ""
             print(
-                f"- model patch dry-run: would_patch={len(rep.patched_files)} already_patched={rep.skipped_already_patched} "
+                f"- model patch dry-run: would_patch={len(rep.patched_files)}{repair_note} already_patched={rep.skipped_already_patched} "
                 f"not_applicable={rep.skipped_not_applicable} errors={len(rep.errors)}"
             )
         else:
@@ -168,7 +169,9 @@ def cmd_open(
             cursor_agent_path=resolve_cursor_agent_path(),
         )
         if vdir is not None:
-            patch_cursor_agent_models(versions_dir=vdir, dry_run=False, force=force_patch_models)
+            _rep = patch_cursor_agent_models(versions_dir=vdir, dry_run=False, force=force_patch_models)
+            if _rep.repaired_files:
+                print(f"ccm: repaired {len(_rep.repaired_files)} file(s) broken by old CCM patch", flush=True)
     cmd = build_resume_command(chat_id, workspace_path=workspace_path, agent_dirs=agent_dirs)
     if dry_run:
         # Display as a shell-friendly snippet.
@@ -383,7 +386,9 @@ def cmd_tui(
             cursor_agent_path=resolve_cursor_agent_path(),
         )
         if vdir is not None:
-            patch_cursor_agent_models(versions_dir=vdir, dry_run=False, force=force_patch_models)
+            _rep = patch_cursor_agent_models(versions_dir=vdir, dry_run=False, force=force_patch_models)
+            if _rep.repaired_files:
+                print(f"ccm: repaired {len(_rep.repaired_files)} file(s) broken by old CCM patch", flush=True)
 
     # Hide chats whose original workspace folder no longer exists.
     workspaces = _pin_cwd_workspace(
@@ -572,6 +577,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"versions dir: {vdir}")
         print(f"scanned_files: {rep.scanned_files}")
         print(f"patched_files: {len(rep.patched_files)}")
+        if rep.repaired_files:
+            print(f"repaired_files: {len(rep.repaired_files)}  (old CCM patch fixed)")
         print(f"already_patched: {rep.skipped_already_patched}")
         print(f"not_applicable: {rep.skipped_not_applicable}")
         print(f"cached_skips: {rep.skipped_cached}")
