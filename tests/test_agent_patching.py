@@ -308,13 +308,56 @@ class TestAgentPatching(unittest.TestCase):
             self.assertEqual(len(rep1.patched_files), 1)
 
             patched = js.read_text(encoding="utf-8")
-            self.assertIn("({ enabled: false })", patched)
+            self.assertIn("Promise.resolve({ enabled: false })", patched)
             self.assertIn("CCM_PATCH_AUTORUN_CONTROLS_DISABLED", patched)
             self.assertNotIn("getAutoRunControls", patched)
 
             bak = js.with_suffix(js.suffix + ".ccm.bak")
             self.assertTrue(bak.exists())
             self.assertIn("getAutoRunControls", bak.read_text(encoding="utf-8"))
+
+    def test_patch_autorun_controls_upgrade_plain_object_to_promise(self) -> None:
+        """Old patches used a plain object that broke .catch() chains."""
+        old_patched = SAMPLE_JS_AUTORUN_CALL_ONLY.replace(
+            "teamSettingsService.getAutoRunControls()",
+            "({ enabled: false })/* CCM_PATCH_AUTORUN_CONTROLS_DISABLED */",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            versions_dir = Path(td) / "versions"
+            vdir = versions_dir / "test-version"
+            vdir.mkdir(parents=True, exist_ok=True)
+            js = vdir / "1234.index.js"
+            js.write_text(old_patched, encoding="utf-8")
+
+            rep = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False)
+            self.assertTrue(rep.ok)
+            self.assertEqual(len(rep.patched_files), 1)
+
+            patched = js.read_text(encoding="utf-8")
+            self.assertIn("Promise.resolve({ enabled: false })", patched)
+            # The old non-Promise pattern must not appear (except as part of Promise.resolve).
+            self.assertNotIn("yield ({ enabled: false })", patched)
+
+    def test_patch_autorun_catch_chain_safe(self) -> None:
+        """Replacement must be .catch()-safe for non-yielded call sites."""
+        js_with_catch = (
+            'var z = F.getAutoRunControls().catch(function(){});\n'
+            'console.log(z);\n'
+        )
+        with tempfile.TemporaryDirectory() as td:
+            versions_dir = Path(td) / "versions"
+            vdir = versions_dir / "test-version"
+            vdir.mkdir(parents=True, exist_ok=True)
+            js = vdir / "1234.index.js"
+            js.write_text(js_with_catch, encoding="utf-8")
+
+            rep = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False)
+            self.assertTrue(rep.ok)
+            self.assertEqual(len(rep.patched_files), 1)
+
+            patched = js.read_text(encoding="utf-8")
+            self.assertIn("Promise.resolve({ enabled: false })", patched)
+            self.assertIn(".catch(function(){})", patched)
 
 
 if __name__ == "__main__":

@@ -21,7 +21,8 @@ _PATCH_SIGNATURE = "CCM_PATCH_MODELDETAILS_ONLY"
 _PATCH_AUTORUN_MARKER = "CCM_PATCH_AUTORUN_CONTROLS_DISABLED"
 _PATCH_CACHE_FILENAME = ".ccm-patch-cache.json"
 _PATCH_CACHE_VERSION = 1
-_PATCH_CACHE_SIGNATURE = "|".join([_PATCH_MARKER, _PATCH_SIGNATURE, _PATCH_AUTORUN_MARKER])
+_PATCH_AUTORUN_V2 = "promise"  # bumped to invalidate cache after .catch fix
+_PATCH_CACHE_SIGNATURE = "|".join([_PATCH_MARKER, _PATCH_SIGNATURE, _PATCH_AUTORUN_MARKER, _PATCH_AUTORUN_V2])
 _PATCH_CACHE_STATUS_PATCHED = "already_patched"
 _PATCH_CACHE_STATUS_NOT_APPLICABLE = "not_applicable"
 
@@ -279,9 +280,17 @@ def _patch_auto_run_controls(txt: str) -> Tuple[str, int]:
     This is best-effort and intentionally avoids touching lines already set to `null`.
     """
     out, n_assign = _RE_AUTORUN_CONTROLS_ASSIGN.subn("const autoRunControls = null", txt)
-    replacement = "({ enabled: false })/* " + _PATCH_AUTORUN_MARKER + " */"
+    replacement = "Promise.resolve({ enabled: false })/* " + _PATCH_AUTORUN_MARKER + " */"
     out, n_call = _RE_AUTORUN_CONTROLS_CALL.subn(replacement, out)
-    return out, n_assign + n_call
+
+    # Upgrade old patches that returned a plain object instead of a Promise.
+    # The old replacement broke code like `getAutoRunControls().catch(...)`.
+    _OLD_BROKEN = "({ enabled: false })/* " + _PATCH_AUTORUN_MARKER + " */"
+    n_upgrade = out.count(_OLD_BROKEN)
+    if n_upgrade:
+        out = out.replace(_OLD_BROKEN, replacement)
+
+    return out, n_assign + n_call + n_upgrade
 
 def _extract_call_arg(block: str) -> Optional[str]:
     """
