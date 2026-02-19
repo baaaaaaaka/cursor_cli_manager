@@ -289,10 +289,12 @@ def _patch_auto_run_controls(txt: str) -> Tuple[str, int, int]:
 
     # Upgrade old patches that returned a plain object instead of a Promise.
     # The old replacement broke code like `getAutoRunControls().catch(...)`.
-    _OLD_BROKEN = "({ enabled: false })/* " + _PATCH_AUTORUN_MARKER + " */"
-    n_repair = out.count(_OLD_BROKEN)
+    # Use a regex with negative lookbehind so we don't corrupt already-correct
+    # `Promise.resolve(...)` replacements (the old pattern is a substring of the new one).
+    _OLD_BROKEN_RE = re.compile(r"(?<!resolve)" + re.escape("({ enabled: false })/* " + _PATCH_AUTORUN_MARKER + " */"))
+    n_repair = len(_OLD_BROKEN_RE.findall(out))
     if n_repair:
-        out = out.replace(_OLD_BROKEN, replacement)
+        out = _OLD_BROKEN_RE.sub(replacement, out)
 
     return out, n_assign + n_call + n_repair, n_repair
 

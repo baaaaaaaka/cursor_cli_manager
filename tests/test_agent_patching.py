@@ -9,6 +9,7 @@ from cursor_cli_manager.agent_patching import (
     ENV_CCM_CURSOR_AGENT_VERSIONS_DIR,
     ENV_CCM_PATCH_CURSOR_AGENT_MODELS,
     ENV_CURSOR_AGENT_VERSIONS_DIR,
+    _patch_auto_run_controls,
     patch_cursor_agent_models,
     resolve_cursor_agent_versions_dir,
     should_patch_models,
@@ -72,6 +73,16 @@ function getPermissions(teamSettingsService) {
     });
 }
 """
+
+
+# Realistic minified JS with both ``yield X.getAutoRunControls()`` and
+# ``X.getAutoRunControls().catch(...)`` in the same file — mirrors the
+# actual cursor-agent 2026.02.13 bundle layout.
+SAMPLE_JS_AUTORUN_MIXED = (
+    'if(g){let e=!1;if(p){const t=yield p.getAutoRunControls();'
+    '!0===(null==t?void 0:t.enabled)&&!0!==t.enableRunEverything&&(e=!0)}}\n'
+    'var z=F.getAutoRunControls().catch((()=>{})),N=new u.$1(L);\n'
+)
 
 
 class TestAgentPatching(unittest.TestCase):
@@ -364,6 +375,93 @@ class TestAgentPatching(unittest.TestCase):
             patched = js.read_text(encoding="utf-8")
             self.assertIn("Promise.resolve({ enabled: false })", patched)
             self.assertIn(".catch(function(){})", patched)
+
+
+    def test_patch_autorun_no_double_promise_resolve(self) -> None:
+        """Regression: repair code must not corrupt freshly-patched Promise.resolve(...)."""
+        out, n_changed, n_repaired = _patch_auto_run_controls(
+            "const res = yield teamSettingsService.getAutoRunControls();"
+        )
+        self.assertGreater(n_changed, 0)
+        self.assertEqual(n_repaired, 0)
+        self.assertIn("Promise.resolve({ enabled: false })", out)
+        self.assertNotIn("resolvePromise", out)
+
+    def test_patch_autorun_idempotent_on_correct_patch(self) -> None:
+        """Already-correct Promise.resolve(...) must not be touched on re-patch."""
+        already_correct = (
+            "const res = yield Promise.resolve({ enabled: false })"
+            "/* CCM_PATCH_AUTORUN_CONTROLS_DISABLED */;"
+        )
+        out, n_changed, n_repaired = _patch_auto_run_controls(already_correct)
+        self.assertEqual(n_changed, 0)
+        self.assertEqual(n_repaired, 0)
+        self.assertEqual(out, already_correct)
+
+    def test_patch_autorun_mixed_yield_and_catch(self) -> None:
+        """File with both yield and .catch() call-sites must be patched correctly."""
+        with tempfile.TemporaryDirectory() as td:
+            versions_dir = Path(td) / "versions"
+            vdir = versions_dir / "test-version"
+            vdir.mkdir(parents=True, exist_ok=True)
+            js = vdir / "414.index.js"
+            js.write_text(SAMPLE_JS_AUTORUN_MIXED, encoding="utf-8")
+
+            rep = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False)
+            self.assertTrue(rep.ok)
+            self.assertEqual(len(rep.patched_files), 1)
+
+            patched = js.read_text(encoding="utf-8")
+            self.assertNotIn("getAutoRunControls", patched)
+            self.assertNotIn("resolvePromise", patched)
+            self.assertEqual(patched.count("Promise.resolve({ enabled: false })"), 2)
+            # .catch() chain must survive after the second call-site
+            self.assertIn(".catch((()=>{}))", patched)
+
+    def test_patch_autorun_mixed_idempotent(self) -> None:
+        """Re-patching a mixed yield+catch file must be a no-op."""
+        with tempfile.TemporaryDirectory() as td:
+            versions_dir = Path(td) / "versions"
+            vdir = versions_dir / "test-version"
+            vdir.mkdir(parents=True, exist_ok=True)
+            js = vdir / "414.index.js"
+            js.write_text(SAMPLE_JS_AUTORUN_MIXED, encoding="utf-8")
+
+            patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False)
+            patched_first = js.read_text(encoding="utf-8")
+
+            rep2 = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False, force=True)
+            self.assertTrue(rep2.ok)
+            self.assertEqual(len(rep2.patched_files), 0)
+            self.assertEqual(len(rep2.repaired_files), 0)
+            patched_second = js.read_text(encoding="utf-8")
+            self.assertEqual(patched_first, patched_second)
+
+    def test_patch_autorun_repair_old_broken_in_mixed_file(self) -> None:
+        """Old broken patches in a mixed file must be repaired without corruption."""
+        old_broken = SAMPLE_JS_AUTORUN_MIXED.replace(
+            "p.getAutoRunControls()",
+            "({ enabled: false })/* CCM_PATCH_AUTORUN_CONTROLS_DISABLED */",
+        ).replace(
+            "F.getAutoRunControls()",
+            "({ enabled: false })/* CCM_PATCH_AUTORUN_CONTROLS_DISABLED */",
+        )
+        with tempfile.TemporaryDirectory() as td:
+            versions_dir = Path(td) / "versions"
+            vdir = versions_dir / "test-version"
+            vdir.mkdir(parents=True, exist_ok=True)
+            js = vdir / "414.index.js"
+            js.write_text(old_broken, encoding="utf-8")
+
+            rep = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False)
+            self.assertTrue(rep.ok)
+            self.assertEqual(len(rep.patched_files), 1)
+            self.assertEqual(len(rep.repaired_files), 1)
+
+            patched = js.read_text(encoding="utf-8")
+            self.assertNotIn("resolvePromise", patched)
+            self.assertEqual(patched.count("Promise.resolve({ enabled: false })"), 2)
+            self.assertIn(".catch((()=>{}))", patched)
 
 
 if __name__ == "__main__":
