@@ -7,6 +7,7 @@ import signal
 import subprocess
 import threading
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -18,10 +19,14 @@ from cursor_cli_manager.ccm_config import has_legacy_install
 ENV_CURSOR_AGENT_PATH = "CURSOR_AGENT_PATH"
 
 # Default cursor-agent flags we want enabled for interactive runs.
-DEFAULT_CURSOR_AGENT_FLAGS = ["--approve-mcps", "--browser", "--force"]
+DEFAULT_CURSOR_AGENT_FLAGS = ["--approve-mcps", "--force"]
 
 _FORCE_DISABLED_RETRY_MESSAGE = "Detected 'Run Everything' restriction; retrying without '--force'."
 _UNKNOWN_OPTION_RETRY_MESSAGE = "Detected unsupported cursor-agent option {flag!r}; retrying without it."
+_QUICK_STARTUP_FAILURE_MAX_S = 3.0
+_QUICK_STARTUP_FAILURE_MESSAGE = "cursor cli reported an error and exited quickly (exit code {code})."
+_QUICK_STARTUP_FAILURE_NO_DETAILS = "No additional error details were printed by cursor cli."
+_QUICK_STARTUP_FAILURE_RETRY_HINT = "Tip: try running the same command again once; transient startup issues can recover on retry."
 
 _FLAG_TOKEN_RE = re.compile(r"-{1,2}[A-Za-z][\w-]*")
 _UNRECOGNIZED_ARGUMENTS_RE = re.compile(
@@ -173,6 +178,10 @@ def _without_force_flag(cmd: List[str]) -> List[str]:
     return [c for c in cmd if c not in ("--force", "-f")]
 
 
+def _should_monitor_launch(cmd: List[str]) -> bool:
+    return any(_command_contains_flag(cmd, flag) for flag in DEFAULT_CURSOR_AGENT_FLAGS)
+
+
 def _filter_supported_optional_flags(cmd: List[str]) -> List[str]:
     if not cmd:
         return []
@@ -198,6 +207,21 @@ def _prepare_exec_command(cmd: List[str]) -> List[str]:
 def _stderr_indicates_force_disabled(stderr_text: str) -> bool:
     text = (stderr_text or "").lower()
     return "run everything" in text and "disabled" in text and "--force" in text
+
+
+def _report_quick_startup_failure(*, rc: int, stderr_text: str, elapsed_s: float) -> None:
+    if rc == 0:
+        return
+    if elapsed_s > _QUICK_STARTUP_FAILURE_MAX_S:
+        return
+    has_stderr = bool((stderr_text or "").strip())
+    try:
+        print(_QUICK_STARTUP_FAILURE_MESSAGE.format(code=rc), file=sys.stderr, flush=True)
+        if not has_stderr:
+            print(_QUICK_STARTUP_FAILURE_NO_DETAILS, file=sys.stderr, flush=True)
+        print(_QUICK_STARTUP_FAILURE_RETRY_HINT, file=sys.stderr, flush=True)
+    except Exception:
+        return
 
 
 def _run_cursor_agent(cmd: List[str]) -> Tuple[int, str]:
@@ -301,10 +325,12 @@ def _exec_cursor_agent(cmd: List[str]) -> "os.NoReturn":
         # Keep all flags (including --force), but avoid Windows-specific
         # `os.execvp` quirks for interactive cursor-agent sessions.
         _exec_or_run_cursor_agent(cmd)
-    if "--force" in cmd or "-f" in cmd:
+    if _should_monitor_launch(cmd):
         retry_cmd = list(cmd)
         while True:
+            started_at = time.monotonic()
             rc, err = _run_cursor_agent(retry_cmd)
+            elapsed_s = max(0.0, time.monotonic() - started_at)
             if rc == 0:
                 raise SystemExit(0)
             if _stderr_indicates_force_disabled(err) and ("--force" in retry_cmd or "-f" in retry_cmd):
@@ -324,6 +350,7 @@ def _exec_cursor_agent(cmd: List[str]) -> "os.NoReturn":
                 if "--force" not in retry_cmd and "-f" not in retry_cmd:
                     _exec_or_run_cursor_agent(retry_cmd)
                 continue
+            _report_quick_startup_failure(rc=rc, stderr_text=err, elapsed_s=elapsed_s)
             raise SystemExit(rc)
     _exec_or_run_cursor_agent(cmd)
 

@@ -93,7 +93,7 @@ class TestOpening(unittest.TestCase):
         old_probed = opening._PROBED_CURSOR_AGENT_FLAGS
         try:
             opening._PROBE_STARTED = True
-            opening._PROBED_CURSOR_AGENT_FLAGS = ["--browser"]
+            opening._PROBED_CURSOR_AGENT_FLAGS = ["--approve-mcps"]
 
             with tempfile.TemporaryDirectory() as td:
                 td_path = Path(td)
@@ -107,8 +107,7 @@ class TestOpening(unittest.TestCase):
                     cursor_agent_path=str(agent),
                     agent_dirs=agent_dirs,
                 )
-                self.assertIn("--browser", cmd)
-                self.assertNotIn("--approve-mcps", cmd)
+                self.assertIn("--approve-mcps", cmd)
                 self.assertNotIn("--force", cmd)
         finally:
             opening._PROBE_STARTED = old_started
@@ -122,7 +121,7 @@ class TestOpening(unittest.TestCase):
         def fake_runner(_cmd, _timeout_s):
             # Block until test releases; runs in background thread.
             evt.wait(timeout=2.0)
-            return 0, " --browser \n --approve-mcps \n", ""
+            return 0, " --approve-mcps \n --force \n", ""
 
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
@@ -182,13 +181,13 @@ class TestOpening(unittest.TestCase):
         import cursor_cli_manager.opening as opening
 
         def supports_flag(_agent, flag):  # noqa: ANN001
-            return flag != "--browser"
+            return flag != "--approve-mcps"
 
         with patch("cursor_cli_manager.opening._supports_optional_flag", side_effect=supports_flag):
-            cmd = ["/tmp/cursor-agent", "--browser", "--approve-mcps", "--resume", "abc123"]
+            cmd = ["/tmp/cursor-agent", "--approve-mcps", "--force", "--resume", "abc123"]
             prepared = opening._prepare_exec_command(cmd)
-            self.assertNotIn("--browser", prepared)
-            self.assertIn("--approve-mcps", prepared)
+            self.assertNotIn("--approve-mcps", prepared)
+            self.assertIn("--force", prepared)
             self.assertIn("--resume", prepared)
             self.assertIn("abc123", prepared)
 
@@ -214,8 +213,8 @@ class TestOpening(unittest.TestCase):
                 return 0, "", ""
 
             with patch("cursor_cli_manager.opening._default_runner", side_effect=fake_runner):
-                self.assertTrue(opening._supports_optional_flag("/tmp/cursor-agent", "--browser"))
-                self.assertTrue(opening._supports_optional_flag("/tmp/cursor-agent", "--browser"))
+                self.assertTrue(opening._supports_optional_flag("/tmp/cursor-agent", "--approve-mcps"))
+                self.assertTrue(opening._supports_optional_flag("/tmp/cursor-agent", "--approve-mcps"))
 
             self.assertEqual(len(calls), 1)
         finally:
@@ -354,7 +353,7 @@ class TestOpening(unittest.TestCase):
             agent = td_path / "cursor-agent"
             agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
 
-            err_msg = "error: unknown option '--browser'\n"
+            err_msg = "error: unknown option '--approve-mcps'\n"
             calls = []
 
             def fake_run(cmd):  # noqa: ANN001
@@ -371,9 +370,9 @@ class TestOpening(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     exec_new_chat(workspace_path=ws, cursor_agent_path=str(agent))
 
-            self.assertIn("--browser", calls[0])
-            self.assertNotIn("--browser", calls[1])
-            self.assertIn("--approve-mcps", calls[1])
+            self.assertIn("--approve-mcps", calls[0])
+            self.assertNotIn("--approve-mcps", calls[1])
+            self.assertIn("--force", calls[1])
 
     def test_exec_new_chat_retries_for_multiple_unknown_options(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -384,10 +383,11 @@ class TestOpening(unittest.TestCase):
             agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
 
             err_msgs = [
-                "error: unknown option '--browser'\n",
-                "error: unrecognized option '--approve-mcps'\n",
+                "error: unknown option '--approve-mcps'\n",
+                "error: unrecognized option '--force'\n",
             ]
             calls = []
+            captured: dict = {}
 
             def fake_run(cmd):  # noqa: ANN001
                 calls.append(list(cmd))
@@ -395,18 +395,71 @@ class TestOpening(unittest.TestCase):
                     return 2, err_msgs[len(calls) - 1]
                 return 0, ""
 
+            def fake_execvp(_file, args):  # noqa: ANN001
+                captured["args"] = list(args)
+                raise RuntimeError("exec called")
+
             with patch(
                 "cursor_cli_manager.opening.get_cursor_agent_flags", return_value=DEFAULT_CURSOR_AGENT_FLAGS
             ), patch("cursor_cli_manager.opening._supports_optional_flag", return_value=True), patch(
                 "cursor_cli_manager.opening._run_cursor_agent", side_effect=fake_run
-            ):
-                with self.assertRaises(SystemExit):
+            ), patch("cursor_cli_manager.opening.os.execvp", side_effect=fake_execvp):
+                with self.assertRaises(RuntimeError):
                     exec_new_chat(workspace_path=ws, cursor_agent_path=str(agent))
 
-            self.assertIn("--browser", calls[0])
-            self.assertNotIn("--browser", calls[1])
-            self.assertIn("--approve-mcps", calls[1])
-            self.assertNotIn("--approve-mcps", calls[2])
+            self.assertIn("--approve-mcps", calls[0])
+            self.assertNotIn("--approve-mcps", calls[1])
+            self.assertIn("--force", calls[1])
+            self.assertNotIn("--approve-mcps", captured["args"])
+            self.assertNotIn("--force", captured["args"])
+
+    def test_exec_new_chat_reports_quick_startup_failure_without_details(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            ws = td_path / "ws"
+            ws.mkdir(parents=True, exist_ok=True)
+            agent = td_path / "cursor-agent"
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+            err_buf = io.StringIO()
+            with patch(
+                "cursor_cli_manager.opening.get_cursor_agent_flags", return_value=DEFAULT_CURSOR_AGENT_FLAGS
+            ), patch("cursor_cli_manager.opening._supports_optional_flag", return_value=True), patch(
+                "cursor_cli_manager.opening._run_cursor_agent", return_value=(1, "")
+            ), redirect_stderr(err_buf):
+                with self.assertRaises(SystemExit) as cm:
+                    exec_new_chat(workspace_path=ws, cursor_agent_path=str(agent))
+
+            self.assertEqual(cm.exception.code, 1)
+            out = err_buf.getvalue()
+            self.assertIn("Launching cursor-agent", out)
+            self.assertIn("cursor cli reported an error and exited quickly (exit code 1).", out)
+            self.assertIn("No additional error details were printed by cursor cli.", out)
+            self.assertIn("try running the same command again once", out)
+
+    def test_exec_new_chat_reports_quick_startup_failure_with_details(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            ws = td_path / "ws"
+            ws.mkdir(parents=True, exist_ok=True)
+            agent = td_path / "cursor-agent"
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+            err_buf = io.StringIO()
+            with patch(
+                "cursor_cli_manager.opening.get_cursor_agent_flags", return_value=DEFAULT_CURSOR_AGENT_FLAGS
+            ), patch("cursor_cli_manager.opening._supports_optional_flag", return_value=True), patch(
+                "cursor_cli_manager.opening._run_cursor_agent", return_value=(2, "error: boom\n")
+            ), redirect_stderr(err_buf):
+                with self.assertRaises(SystemExit) as cm:
+                    exec_new_chat(workspace_path=ws, cursor_agent_path=str(agent))
+
+            self.assertEqual(cm.exception.code, 2)
+            out = err_buf.getvalue()
+            self.assertIn("Launching cursor-agent", out)
+            self.assertIn("cursor cli reported an error and exited quickly (exit code 2).", out)
+            self.assertIn("try running the same command again once", out)
+            self.assertNotIn("No additional error details were printed by cursor cli.", out)
 
     def test_exec_new_chat_windows_uses_interactive_runner(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -431,7 +484,6 @@ class TestOpening(unittest.TestCase):
             called_cmd = run_interactive.call_args[0][0]
             self.assertIn("--force", called_cmd)
             self.assertIn("--approve-mcps", called_cmd)
-            self.assertIn("--browser", called_cmd)
 
     def test_exec_resume_command_windows_uses_interactive_runner(self) -> None:
         import cursor_cli_manager.opening as opening
@@ -591,7 +643,6 @@ marker.write_text("returned", encoding="utf-8")
             self.assertIn("--workspace", argv)
             self.assertIn(str(ws), argv)
             self.assertIn("--approve-mcps", argv)
-            self.assertIn("--browser", argv)
             self.assertIn("--force", argv)
             self.assertIn("probe-stdin:hello-from-stdin", proc.stdout)
 
