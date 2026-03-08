@@ -185,6 +185,28 @@ class TestAgentPatching(unittest.TestCase):
                 inferred = resolve_cursor_agent_versions_dir(cursor_agent_path=str(wrapper))
                 self.assertIsNone(inferred)
 
+    def test_resolve_versions_dir_from_posix_wrapper_embedded_versions_env(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            versions_dir = root / "versions"
+            vdir = versions_dir / "2026.02.27-e7d2ef6"
+            vdir.mkdir(parents=True, exist_ok=True)
+            (vdir / "cursor-agent").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            (vdir / "123.index.js").write_text(SAMPLE_JS, encoding="utf-8")
+            wrapper = root / "bin" / "cursor-agent"
+            wrapper.parent.mkdir(parents=True, exist_ok=True)
+            wrapper.write_text(
+                "#!/bin/sh\n"
+                f'CURSOR_AGENT_VERSIONS_DIR="{versions_dir}"\n'
+                "export CURSOR_AGENT_VERSIONS_DIR\n"
+                f'exec "{vdir / "cursor-agent"}" "$@"\n',
+                encoding="utf-8",
+            )
+
+            inferred = resolve_cursor_agent_versions_dir(cursor_agent_path=str(wrapper))
+            self.assertIsNotNone(inferred)
+            self.assertEqual(inferred.resolve(), versions_dir.resolve())
+
     def test_patch_cursor_agent_models_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             versions_dir = Path(td) / "versions"
@@ -466,4 +488,3 @@ class TestAgentPatching(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

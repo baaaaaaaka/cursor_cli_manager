@@ -18,6 +18,8 @@ jobs:
             python: "3.12"
           - os: macos-latest
             python: "3.12"
+          - os: macos-15-intel
+            python: "3.12"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -63,3 +65,30 @@ jobs:
           python -c "from cursor_cli_manager.windows_deps import ensure_windows_deps; ensure_windows_deps()"
           python -m unittest discover -s tests -p "test_*.py" -v
 
+  coverage_core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run focused coverage checks
+        env:
+          TERM: xterm-256color
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+        run: |
+          python -m pip install -U "setuptools<69" wheel
+          python -m pip install -U pip coverage
+          python -m pip install -e .
+          coverage run --branch -m unittest \
+            tests.test_cursor_agent_install \
+            tests.test_cursor_agent_install_integration \
+            tests.test_cli_auto_install \
+            tests.test_opening \
+            tests.test_agent_patching \
+            tests.test_cli_tui_quit \
+            tests.test_cli_tui_terminal_error \
+            tests.test_cli_tui_upgrade_restart_fallback
+          coverage report --include='cursor_cli_manager/cursor_agent_install.py,cursor_cli_manager/cli.py,cursor_cli_manager/opening.py,cursor_cli_manager/agent_patching.py' --fail-under=70

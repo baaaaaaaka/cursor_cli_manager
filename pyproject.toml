@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cursor-cli-manager"
-version = "0.7.5"
+version = "0.7.6"
 description = "Terminal UI manager for cursor-agent chats (terminal-only)."
 readme = "README.md"
 requires-python = ">=3.7"
@@ -26,4 +26,3 @@ include = ["cursor_cli_manager*"]
 [tool.pytest.ini_options]
 # We use the stdlib unittest runner by default. This section is harmless if you prefer pytest.
 testpaths = ["tests"]
-

@@ -25,6 +25,7 @@ _PATCH_AUTORUN_V2 = "promise"  # bumped to invalidate cache after .catch fix
 _PATCH_CACHE_SIGNATURE = "|".join([_PATCH_MARKER, _PATCH_SIGNATURE, _PATCH_AUTORUN_MARKER, _PATCH_AUTORUN_V2])
 _PATCH_CACHE_STATUS_PATCHED = "already_patched"
 _PATCH_CACHE_STATUS_NOT_APPLICABLE = "not_applicable"
+_WRAPPER_VERSIONS_DIR_RE = re.compile(r'^\s*CURSOR_AGENT_VERSIONS_DIR\s*=\s*"([^"\n]+)"', re.MULTILINE)
 
 
 def _is_truthy(v: Optional[str]) -> bool:
@@ -111,6 +112,9 @@ def _infer_versions_dir_from_cursor_agent_executable(cursor_agent_path: str) -> 
     p = Path(cursor_agent_path).expanduser()
     if not p.exists():
         return None
+    embedded = _extract_versions_dir_from_wrapper(p)
+    if embedded is not None:
+        return embedded
     try:
         p = p.resolve()
     except Exception:
@@ -124,6 +128,22 @@ def _infer_versions_dir_from_cursor_agent_executable(cursor_agent_path: str) -> 
         candidate = d / "versions"
         if _looks_like_versions_dir(candidate):
             return candidate
+    return None
+
+
+def _extract_versions_dir_from_wrapper(path: Path) -> Optional[Path]:
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        txt = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return None
+    match = _WRAPPER_VERSIONS_DIR_RE.search(txt)
+    if not match:
+        return None
+    p = Path(match.group(1)).expanduser()
+    if _looks_like_versions_dir(p):
+        return p
     return None
 
 
@@ -597,4 +617,3 @@ def patch_cursor_agent_models(
         except Exception:
             pass
     return rep
-

@@ -1,0 +1,38 @@
+name: cursor-agent-installer-canary
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate upstream installer metadata
+        run: |
+          set -euxo pipefail
+          python -m pip install -U "setuptools<69" wheel
+          python -m pip install -U pip
+          python -m pip install -e .
+          python - <<'PY'
+from urllib.request import Request, urlopen
+from cursor_cli_manager.cursor_agent_install import fetch_official_installer_metadata, select_cursor_agent_install_spec
+
+meta = fetch_official_installer_metadata()
+linux = select_cursor_agent_install_spec(meta, system="Linux", machine="x86_64")
+windows = select_cursor_agent_install_spec(meta, system="Windows", machine="AMD64")
+
+for url in (linux.download_url, windows.download_url):
+    req = Request(url, method="HEAD", headers={"User-Agent": "cursor-cli-manager"})
+    with urlopen(req, timeout=20) as resp:
+        if resp.status not in (200, 301, 302):
+            raise SystemExit(f"unexpected status {resp.status} for {url}")
+        print(resp.status, url)
+PY

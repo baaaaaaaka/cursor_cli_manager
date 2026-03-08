@@ -28,6 +28,8 @@ class TestCmdTuiQuit(unittest.TestCase):
             "cursor_cli_manager.cli._pin_cwd_workspace", return_value=[ws]
         ), patch("cursor_cli_manager.cli._run_tui", side_effect=fake_run_tui), patch(
             "cursor_cli_manager.cli.start_cursor_agent_flag_probe"
+        ), patch(
+            "cursor_cli_manager.cli._ensure_cursor_agent_for_command", return_value="/tmp/cursor-agent"
         ):
             from cursor_cli_manager.cli import cmd_tui
 
@@ -38,4 +40,3 @@ class TestCmdTuiQuit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

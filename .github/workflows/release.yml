@@ -132,6 +132,34 @@ jobs:
           name: ccm-macos-arm64.tar.gz
           path: out/ccm-macos-arm64.tar.gz
 
+  build-windows-x86_64:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Windows build dependencies
+        shell: pwsh
+        run: |
+          $env:PYTHONUTF8 = "1"
+          python -m pip install -U pip "setuptools<69" wheel pyinstaller certifi windows-curses
+          python -c "import os; from pathlib import Path; root = Path(os.environ['LOCALAPPDATA']) / 'ccm' / 'bin'; root.mkdir(parents=True, exist_ok=True); (root / 'rg.exe').write_bytes(b'MZ')"
+
+      - name: Build Windows x86_64 binary
+        shell: pwsh
+        run: |
+          $env:PYTHONUTF8 = "1"
+          python -m PyInstaller --clean -n ccm --hidden-import _curses --collect-data certifi --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
+          Compress-Archive -Path out/_dist/ccm -DestinationPath out/ccm-windows-x86_64.zip -Force
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ccm-windows-x86_64.zip
+          path: out/ccm-windows-x86_64.zip
+
   smoke-linux:
     runs-on: ubuntu-latest
     needs:
@@ -225,6 +253,14 @@ jobs:
           "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" list --pretty
           "${RUNNER_TEMP}/ccm-test/bin/cursor-cli-manager" --config-dir "${CFG}" list
 
+      - name: Smoke test linux auto-install without external Python
+        env:
+          CCM_BIN: ${{ runner.temp }}/ccm-test/bin/ccm
+          PYTHON_BIN: python3
+        run: |
+          set -euxo pipefail
+          bash scripts/test_auto_install_bundle.sh linux x64
+
   smoke-macos-x86_64:
     runs-on: macos-15-intel
     needs:
@@ -292,6 +328,14 @@ jobs:
           "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" doctor
           "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" list --pretty
           "${RUNNER_TEMP}/ccm-test/bin/cursor-cli-manager" --config-dir "${CFG}" list
+
+      - name: Smoke test macOS x86_64 auto-install without external Python
+        env:
+          CCM_BIN: ${{ runner.temp }}/ccm-test/bin/ccm
+          PYTHON_BIN: python3
+        run: |
+          set -euxo pipefail
+          bash scripts/test_auto_install_bundle.sh darwin x64
 
   smoke-macos-arm64:
     runs-on: macos-latest
@@ -361,6 +405,52 @@ jobs:
           "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" list --pretty
           "${RUNNER_TEMP}/ccm-test/bin/cursor-cli-manager" --config-dir "${CFG}" list
 
+      - name: Smoke test macOS arm64 auto-install without external Python
+        env:
+          CCM_BIN: ${{ runner.temp }}/ccm-test/bin/ccm
+          PYTHON_BIN: python3
+        run: |
+          set -euxo pipefail
+          bash scripts/test_auto_install_bundle.sh darwin arm64
+
+  smoke-windows:
+    runs-on: windows-latest
+    needs:
+      - build-windows-x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ccm-windows-x86_64.zip
+          path: dist
+
+      - name: Expand Windows artifact
+        shell: pwsh
+        run: |
+          Expand-Archive -Path dist/ccm-windows-x86_64.zip -DestinationPath "$env:RUNNER_TEMP/ccm-test" -Force
+
+      - name: Smoke test Windows bundle
+        shell: pwsh
+        run: |
+          $cfg = Join-Path $env:RUNNER_TEMP "ccm-test\config"
+          New-Item -ItemType Directory -Path $cfg -Force | Out-Null
+          & "$env:RUNNER_TEMP\ccm-test\ccm\ccm.exe" --config-dir $cfg doctor
+          & "$env:RUNNER_TEMP\ccm-test\ccm\ccm.exe" --config-dir $cfg list --pretty
+
+      - name: Smoke test Windows auto-install without external Python
+        shell: pwsh
+        env:
+          CCM_BIN: ${{ runner.temp }}\ccm-test\ccm\ccm.exe
+        run: |
+          $env:PYTHONUTF8 = "1"
+          python scripts/test_auto_install_bundle.py --os windows --arch x64 --ccm-bin "$env:CCM_BIN"
+
   publish:
     runs-on: ubuntu-latest
     needs:
@@ -369,9 +459,11 @@ jobs:
       - build-linux-x86_64-nc6
       - build-macos-x86_64
       - build-macos-arm64
+      - build-windows-x86_64
       - smoke-linux
       - smoke-macos-x86_64
       - smoke-macos-arm64
+      - smoke-windows
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download artifacts
@@ -383,7 +475,7 @@ jobs:
       - name: Prepare checksums.txt
         run: |
           set -euxo pipefail
-          (cd dist && sha256sum ccm-*.tar.gz > checksums.txt)
+          (cd dist && sha256sum ccm-* > checksums.txt)
           ls -la dist
 
       - name: Publish GitHub Release
@@ -394,4 +486,3 @@ jobs:
             dist/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

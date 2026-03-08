@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import signal
 import subprocess
 import threading
@@ -14,9 +13,7 @@ from typing import Dict, List, Optional, Tuple
 from cursor_cli_manager.update import _default_runner
 from cursor_cli_manager.agent_paths import CursorAgentDirs, get_cursor_agent_dirs
 from cursor_cli_manager.ccm_config import has_legacy_install
-
-
-ENV_CURSOR_AGENT_PATH = "CURSOR_AGENT_PATH"
+from cursor_cli_manager.cursor_agent_install import ENV_CURSOR_AGENT_PATH, resolve_cursor_agent_installation
 
 # Default cursor-agent flags we want enabled for interactive runs.
 DEFAULT_CURSOR_AGENT_FLAGS = ["--approve-mcps", "--force"]
@@ -363,26 +360,10 @@ def resolve_cursor_agent_path(explicit: Optional[str] = None) -> Optional[str]:
     - explicit arg
     - $CURSOR_AGENT_PATH
     - PATH lookup
-    - ~/.local/bin/cursor-agent
+    - known default install locations
     """
-    if explicit:
-        p = Path(explicit).expanduser()
-        return str(p) if p.exists() else None
-
-    env = os.environ.get(ENV_CURSOR_AGENT_PATH)
-    if env:
-        p = Path(env).expanduser()
-        return str(p) if p.exists() else None
-
-    found = shutil.which("cursor-agent")
-    if found:
-        return found
-
-    default = Path.home() / ".local" / "bin" / "cursor-agent"
-    if default.exists():
-        return str(default)
-
-    return None
+    resolved = resolve_cursor_agent_installation(explicit=explicit)
+    return resolved.path
 
 
 def build_resume_command(
@@ -509,4 +490,3 @@ def exec_new_chat(
                 os.chdir(old_cwd)
             except Exception:
                 pass
-

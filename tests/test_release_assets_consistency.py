@@ -26,13 +26,15 @@ class TestReleaseAssetsConsistency(unittest.TestCase):
             "ccm-linux-x86_64-nc6.tar.gz",
             "ccm-macos-x86_64.tar.gz",
             "ccm-macos-arm64.tar.gz",
+            "ccm-windows-x86_64.zip",
             "checksums.txt",
         ):
             self.assertIn(name, txt)
-        self.assertIn("sha256sum ccm-*.tar.gz", txt)
+        self.assertIn("sha256sum ccm-*", txt)
         # CA bundle must be included in binary releases for SSL fallback.
         self.assertIn("certifi", txt)
         self.assertIn("--collect-data certifi", txt)
+        self.assertIn("Compress-Archive", txt)
 
     def test_linux_build_script_mentions_asset_and_terminfo(self) -> None:
         root = Path(__file__).resolve().parent.parent
@@ -53,4 +55,3 @@ class TestReleaseAssetsConsistency(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

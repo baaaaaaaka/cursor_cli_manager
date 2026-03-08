@@ -40,6 +40,9 @@ This will:
 - Extract it into `~/.local/lib/ccm` and create symlinks in `~/.local/bin`:
   - `ccm`
   - `cursor-cli-manager`
+- When `ccm` later starts a command that needs `cursor-agent`, it can auto-install Cursor Agent into:
+  - POSIX: `~/.local/share/cursor-agent/versions/<version>`
+  - Windows: `%LOCALAPPDATA%\\cursor-agent\\versions\\<version>`
 
 Tip: for stability/security, pin the installer to a tag (or commit SHA):
 
@@ -93,6 +96,10 @@ Or from the repo root:
 python3 -m cursor_cli_manager
 ```
 
+When you start `ccm` or run `ccm open` and no usable `cursor-agent` is found, `ccm` will try to install it automatically.
+This auto-install path is built into `ccm` itself, so it does not require an external `python`, `curl`, `wget`, `tar`,
+or `unzip` on the user's machine.
+
 ## TUI controls
 
 - **Navigation**: Up/Down, PageUp/PageDown
@@ -140,6 +147,12 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 - `CURSOR_AGENT_CONFIG_DIR`: override the config dir (default: `~/.cursor`)
 - `--config-dir <dir>`: override the config dir (same effect as `CURSOR_AGENT_CONFIG_DIR`)
 - `CCM_GITHUB_REPO=owner/name`: override the GitHub repo used by `ccm upgrade` for GitHub-release binaries
+- `CCM_AUTO_INSTALL_CURSOR_AGENT=0`: disable automatic Cursor Agent installation
+- `CCM_CURSOR_AGENT_INSTALLER_URL=<url>`: override the installer metadata source (default: `https://cursor.com/install`)
+- `CCM_CURSOR_AGENT_INSTALL_ROOT=<dir>`: override the Cursor Agent install root
+- `CCM_CURSOR_AGENT_BIN_DIR=<dir>`: override the Cursor Agent launcher directory
+- `CCM_CURSOR_AGENT_INSTALL_TIMEOUT=<seconds>`: override the installer network timeout
+- `CCM_CURSOR_AGENT_POSTINSTALL_PATCH=auto|off|force`: control the EL7/CentOS compatibility patch
 
 ## Versioning policy
 
@@ -156,4 +169,3 @@ Starting from **v0.5.0**, **every change must bump the version** in both:
   “Unknown (<hash>)” entries can become real folder names after you run `ccm` in that folder once.
 - The TUI hides workspaces whose mapped folder no longer exists.
 - We intentionally avoid third-party dependencies; everything uses the Python standard library.
-

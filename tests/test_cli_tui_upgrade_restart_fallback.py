@@ -30,6 +30,8 @@ class TestCmdTuiUpgradeRestartFallback(unittest.TestCase):
         ), patch("cursor_cli_manager.cli._run_tui", side_effect=UpdateRequested()), patch(
             "cursor_cli_manager.cli.start_cursor_agent_flag_probe"
         ), patch(
+            "cursor_cli_manager.cli._ensure_cursor_agent_for_command", return_value="/tmp/cursor-agent"
+        ), patch(
             "cursor_cli_manager.cli.perform_update", return_value=(True, "updated to 0.5.8")
         ), patch.object(
             sys, "frozen", True, create=True
@@ -49,4 +51,3 @@ class TestCmdTuiUpgradeRestartFallback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

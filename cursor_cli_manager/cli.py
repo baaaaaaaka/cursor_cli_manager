@@ -27,6 +27,14 @@ from cursor_cli_manager.agent_store import extract_recent_messages, format_messa
 from cursor_cli_manager.models import AgentChat, AgentWorkspace
 from cursor_cli_manager.agent_store import extract_initial_messages
 from cursor_cli_manager.ccm_config import has_legacy_install, record_installed_version
+from cursor_cli_manager.cursor_agent_install import (
+    auto_install_enabled,
+    ensure_cursor_agent_available,
+    get_cursor_agent_bin_dir,
+    get_cursor_agent_install_root,
+    get_cursor_agent_installer_url,
+    resolve_cursor_agent_installation,
+)
 from cursor_cli_manager.opening import (
     build_resume_command,
     exec_new_chat,
@@ -103,10 +111,19 @@ def cmd_doctor(agent_dirs: CursorAgentDirs) -> int:
     print(f"- Exists: {ws_map_file.exists()}")
     print(f"- Entries: {len(ws_map.workspaces)}")
 
-    agent = resolve_cursor_agent_path()
+    install_root = get_cursor_agent_install_root()
+    bin_dir = get_cursor_agent_bin_dir(install_root=install_root)
+    resolved = resolve_cursor_agent_installation()
+    agent = resolved.path
     print("")
     print("Cursor Agent:")
     print(f"- cursor-agent: {agent or 'NOT FOUND'}")
+    print(f"- auto-install enabled: {auto_install_enabled()}")
+    print(f"- installer url: {get_cursor_agent_installer_url()}")
+    print(f"- install root: {install_root}")
+    print(f"- bin dir: {bin_dir}")
+    if resolved.error and not agent:
+        print(f"- resolution note: {resolved.error}")
     print(f"- Tip: set ${ENV_CURSOR_AGENT_CONFIG_DIR} to override config dir")
 
     vdir = resolve_cursor_agent_versions_dir(cursor_agent_path=agent)
@@ -148,6 +165,14 @@ def cmd_upgrade(*, python: str) -> int:
     return 0 if ok else 1
 
 
+def _ensure_cursor_agent_for_command(*, allow_install: bool) -> Optional[str]:
+    try:
+        return ensure_cursor_agent_available(auto_install=allow_install)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return None
+
+
 def cmd_open(
     agent_dirs: CursorAgentDirs,
     chat_id: str,
@@ -163,6 +188,10 @@ def cmd_open(
         return 2
     # Learning from explicit workspace path improves mapping without requiring user to cd first.
     learn_workspace_path(agent_dirs, workspace_path)
+    if not dry_run:
+        agent = _ensure_cursor_agent_for_command(allow_install=True)
+        if not agent:
+            return 1
     if patch_models and not dry_run:
         vdir = resolve_cursor_agent_versions_dir(
             explicit=cursor_agent_versions_dir,
@@ -377,13 +406,17 @@ def cmd_tui(
             return _restart_self(sys.argv[:] or ["ccm"])
         print(f"Auto-upgrade to {preferred_asset} failed; continuing.", file=sys.stderr)
 
+    agent = _ensure_cursor_agent_for_command(allow_install=True)
+    if not agent:
+        return 1
+
     # Non-blocking: probe cursor-agent optional flags in background while the user browses the TUI.
     if has_legacy_install(agent_dirs):
         start_cursor_agent_flag_probe()
     if patch_models:
         vdir = resolve_cursor_agent_versions_dir(
             explicit=cursor_agent_versions_dir,
-            cursor_agent_path=resolve_cursor_agent_path(),
+            cursor_agent_path=agent,
         )
         if vdir is not None:
             _rep = patch_cursor_agent_models(versions_dir=vdir, dry_run=False, force=force_patch_models)
@@ -592,4 +625,3 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     parser.print_help()
     return 2
-
