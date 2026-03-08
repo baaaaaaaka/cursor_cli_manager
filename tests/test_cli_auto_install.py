@@ -140,6 +140,9 @@ class TestCliAutoInstall(unittest.TestCase):
     def test_open_exec_triggers_auto_install(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             with patch("cursor_cli_manager.cli._ensure_cursor_agent_for_command", return_value="/tmp/cursor-agent") as ensure, patch(
+                "cursor_cli_manager.cli.build_resume_command",
+                return_value=["/tmp/cursor-agent", "--workspace", "/tmp/ws", "--resume", "abc123"],
+            ), patch(
                 "cursor_cli_manager.cli.exec_resume_chat", side_effect=SystemExit(0)
             ):
                 with self.assertRaises(SystemExit):
