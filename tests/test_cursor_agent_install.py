@@ -178,7 +178,9 @@ class TestCursorAgentInstall(unittest.TestCase):
                 cai.ENV_CCM_CURSOR_AGENT_BIN_DIR: str(Path(td) / "bin"),
             },
             clear=False,
-        ), patch("cursor_cli_manager.cursor_agent_install.shutil.which", return_value=None):
+        ), patch("cursor_cli_manager.cursor_agent_install.shutil.which", return_value=None), patch(
+            "cursor_cli_manager.cursor_agent_install.sys.platform", "linux"
+        ):
             version_dir = Path(td) / "root" / "versions" / "2026.02.27-e7d2ef6"
             version_dir.mkdir(parents=True, exist_ok=True)
             exe = version_dir / "cursor-agent"
@@ -351,6 +353,8 @@ class TestCursorAgentInstall(unittest.TestCase):
         ) as verify, patch(
             "cursor_cli_manager.cursor_agent_install.maybe_apply_postinstall_compat_patch",
             return_value=False,
+        ), patch(
+            "cursor_cli_manager.cursor_agent_install.sys.platform", "linux"
         ):
             root = Path(td) / "root"
             bindir = Path(td) / "bin"

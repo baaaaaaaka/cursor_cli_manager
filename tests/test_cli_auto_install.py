@@ -101,7 +101,7 @@ class TestCliAutoInstall(unittest.TestCase):
         self.assertIn("- versions dir:", text)
         self.assertIn("- model patch dry-run: would_patch=1 would_repair=1 already_patched=2 not_applicable=3 errors=1", text)
         self.assertIn("Discovered workspaces: 1", text)
-        self.assertIn("- ws (/tmp/ws)", text)
+        self.assertIn(f"- ws ({ws.workspace_path})", text)
         patch_models.assert_called_once()
 
     def test_doctor_reports_discovery_failure(self) -> None:
@@ -135,7 +135,8 @@ class TestCliAutoInstall(unittest.TestCase):
                 rc = main(["--config-dir", td, "open", "abc123", "--workspace", "/tmp/ws", "--dry-run"])
         self.assertEqual(rc, 0)
         ensure.assert_not_called()
-        self.assertIn("cd /tmp/ws", out.getvalue())
+        self.assertIn("--resume abc123", out.getvalue())
+        self.assertIn("cd ", out.getvalue())
 
     def test_open_exec_triggers_auto_install(self) -> None:
         with tempfile.TemporaryDirectory() as td:
