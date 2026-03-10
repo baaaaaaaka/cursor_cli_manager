@@ -247,6 +247,9 @@ class TestCliAutoInstall(unittest.TestCase):
             ), patch(
                 "cursor_cli_manager.cli._apply_patch_for_command", return_value=True
             ) as apply_patch, patch(
+                "cursor_cli_manager.cli.build_resume_command",
+                return_value=["/tmp/cursor-agent", "--workspace", "/tmp/ws", "--resume", "abc123"],
+            ), patch(
                 "cursor_cli_manager.cli.exec_resume_chat", side_effect=SystemExit(0)
             ):
                 with self.assertRaises(SystemExit):
