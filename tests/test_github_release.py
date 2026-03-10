@@ -168,7 +168,9 @@ class TestGithubReleaseHelpers(unittest.TestCase):
             ), patch.object(
                 gr.sys, "executable", str(exe)
             ):
-                self.assertEqual(gr._bundled_cafile(), str(exe_cert))
+                out = gr._bundled_cafile()
+                self.assertIsNotNone(out)
+                self.assertEqual(Path(out).resolve(), exe_cert.resolve())
 
     def test_detect_linux_ncurses_variant_honors_env_override(self) -> None:
         with patch("cursor_cli_manager.github_release.platform.system", return_value="Linux"), patch(
