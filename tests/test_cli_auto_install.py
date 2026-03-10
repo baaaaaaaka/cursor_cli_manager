@@ -1,4 +1,5 @@
 import io
+import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
@@ -29,6 +30,24 @@ class TestCliAutoInstall(unittest.TestCase):
             with patch("cursor_cli_manager.cli._ensure_cursor_agent_for_command", return_value=None), redirect_stderr(err):
                 rc = cmd_tui(agent_dirs)
         self.assertEqual(rc, 1)
+
+    def test_cmd_tui_returns_1_when_patch_verification_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            agent_dirs = CursorAgentDirs(Path(td) / "cfg")
+            ws = AgentWorkspace(cwd_hash="h", workspace_path=Path("/tmp/ws"), chats_root=Path("/tmp/chats/h"))
+            with patch("cursor_cli_manager.cli._ensure_cursor_agent_for_command", return_value="/tmp/cursor-agent"), patch(
+                "cursor_cli_manager.cli.resolve_cursor_agent_versions_dir", return_value=Path(td) / "versions"
+            ), patch(
+                "cursor_cli_manager.cli._apply_patch_for_command", return_value=False
+            ) as apply_patch, patch(
+                "cursor_cli_manager.cli._run_tui"
+            ) as run_tui, patch(
+                "cursor_cli_manager.cli.discover_agent_workspaces", return_value=[ws]
+            ), patch("cursor_cli_manager.cli._pin_cwd_workspace", return_value=[ws]):
+                rc = cmd_tui(agent_dirs, patch_models=True)
+        self.assertEqual(rc, 1)
+        apply_patch.assert_called_once()
+        run_tui.assert_not_called()
 
     def test_list_does_not_trigger_auto_install(self) -> None:
         out = io.StringIO()
@@ -168,6 +187,62 @@ class TestCliAutoInstall(unittest.TestCase):
             result = _ensure_cursor_agent_for_command(allow_install=True)
         self.assertIsNone(result)
         self.assertIn("boom", err.getvalue())
+
+    def test_patch_models_uses_executable_from_explicit_versions_dir(self) -> None:
+        out = io.StringIO()
+        report = SimpleNamespace(
+            scanned_files=1,
+            patched_files=[Path("a.js")],
+            repaired_files=[],
+            skipped_already_patched=0,
+            skipped_not_applicable=0,
+            skipped_cached=0,
+            errors=[],
+            ok=True,
+        )
+        with tempfile.TemporaryDirectory() as td, patch(
+            "cursor_cli_manager.cli.has_legacy_install", return_value=True
+        ), patch(
+            "cursor_cli_manager.cli.resolve_cursor_agent_versions_dir", return_value=Path(td) / "versions"
+        ), patch(
+            "cursor_cli_manager.cli.latest_cursor_agent_executable_in_versions_dir",
+            return_value="/tmp/from-vdir/cursor-agent",
+        ), patch(
+            "cursor_cli_manager.cli.apply_verified_cursor_agent_patch", return_value=report
+        ) as apply_patch, redirect_stdout(out):
+            rc = main(["--config-dir", td, "--cursor-agent-versions-dir", td, "patch-models"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(apply_patch.call_args.kwargs["cursor_agent_path"], "/tmp/from-vdir/cursor-agent")
+
+    def test_patch_models_uses_executable_from_env_selected_versions_dir(self) -> None:
+        out = io.StringIO()
+        report = SimpleNamespace(
+            scanned_files=1,
+            patched_files=[Path("a.js")],
+            repaired_files=[],
+            skipped_already_patched=0,
+            skipped_not_applicable=0,
+            skipped_cached=0,
+            errors=[],
+            ok=True,
+        )
+        with tempfile.TemporaryDirectory() as td, patch.dict(
+            os.environ, {"CCM_CURSOR_AGENT_VERSIONS_DIR": str(Path(td) / "versions")}, clear=False
+        ), patch(
+            "cursor_cli_manager.cli.has_legacy_install", return_value=True
+        ), patch(
+            "cursor_cli_manager.cli.latest_cursor_agent_executable_in_versions_dir",
+            return_value="/tmp/from-env/cursor-agent",
+        ), patch(
+            "cursor_cli_manager.cli.resolve_cursor_agent_path",
+            return_value="/tmp/current/cursor-agent",
+        ), patch(
+            "cursor_cli_manager.cli.apply_verified_cursor_agent_patch", return_value=report
+        ) as apply_patch, redirect_stdout(out):
+            (Path(td) / "versions").mkdir(parents=True, exist_ok=True)
+            rc = main(["--config-dir", td, "patch-models"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(apply_patch.call_args.kwargs["cursor_agent_path"], "/tmp/from-env/cursor-agent")
 
 
 if __name__ == "__main__":

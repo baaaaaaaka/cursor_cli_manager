@@ -28,11 +28,13 @@ from cursor_cli_manager.models import AgentChat, AgentWorkspace
 from cursor_cli_manager.agent_store import extract_initial_messages
 from cursor_cli_manager.ccm_config import has_legacy_install, record_installed_version
 from cursor_cli_manager.cursor_agent_install import (
+    apply_verified_cursor_agent_patch,
     auto_install_enabled,
     ensure_cursor_agent_available,
     get_cursor_agent_bin_dir,
     get_cursor_agent_install_root,
     get_cursor_agent_installer_url,
+    latest_cursor_agent_executable_in_versions_dir,
     resolve_cursor_agent_installation,
 )
 from cursor_cli_manager.opening import (
@@ -173,6 +175,41 @@ def _ensure_cursor_agent_for_command(*, allow_install: bool) -> Optional[str]:
         return None
 
 
+def _apply_patch_for_command(
+    *,
+    versions_dir: Path,
+    cursor_agent_path: str,
+    agent_dirs: CursorAgentDirs,
+    force_patch_models: bool,
+) -> bool:
+    try:
+        rep = apply_verified_cursor_agent_patch(
+            versions_dir=versions_dir,
+            cursor_agent_path=cursor_agent_path,
+            agent_dirs=agent_dirs,
+            force=force_patch_models,
+        )
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return False
+    if rep.repaired_files:
+        print(f"ccm: repaired {len(rep.repaired_files)} file(s) broken by old CCM patch", flush=True)
+    return True
+
+
+def _patch_verification_executable_for_versions_dir(versions_dir: Path) -> Optional[str]:
+    agent = latest_cursor_agent_executable_in_versions_dir(versions_dir)
+    if agent:
+        return agent
+    current_agent = resolve_cursor_agent_path()
+    if not current_agent:
+        return None
+    current_versions_dir = resolve_cursor_agent_versions_dir(cursor_agent_path=current_agent)
+    if current_versions_dir == versions_dir:
+        return current_agent
+    return None
+
+
 def cmd_open(
     agent_dirs: CursorAgentDirs,
     chat_id: str,
@@ -195,12 +232,16 @@ def cmd_open(
     if patch_models and not dry_run:
         vdir = resolve_cursor_agent_versions_dir(
             explicit=cursor_agent_versions_dir,
-            cursor_agent_path=resolve_cursor_agent_path(),
+            cursor_agent_path=agent,
         )
         if vdir is not None:
-            _rep = patch_cursor_agent_models(versions_dir=vdir, dry_run=False, force=force_patch_models)
-            if _rep.repaired_files:
-                print(f"ccm: repaired {len(_rep.repaired_files)} file(s) broken by old CCM patch", flush=True)
+            if not _apply_patch_for_command(
+                versions_dir=vdir,
+                cursor_agent_path=agent,
+                agent_dirs=agent_dirs,
+                force_patch_models=force_patch_models,
+            ):
+                return 1
     cmd = build_resume_command(chat_id, workspace_path=workspace_path, agent_dirs=agent_dirs)
     if dry_run:
         # Display as a shell-friendly snippet.
@@ -419,9 +460,13 @@ def cmd_tui(
             cursor_agent_path=agent,
         )
         if vdir is not None:
-            _rep = patch_cursor_agent_models(versions_dir=vdir, dry_run=False, force=force_patch_models)
-            if _rep.repaired_files:
-                print(f"ccm: repaired {len(_rep.repaired_files)} file(s) broken by old CCM patch", flush=True)
+            if not _apply_patch_for_command(
+                versions_dir=vdir,
+                cursor_agent_path=agent,
+                agent_dirs=agent_dirs,
+                force_patch_models=force_patch_models,
+            ):
+                return 1
 
     # Hide chats whose original workspace folder no longer exists.
     workspaces = _pin_cwd_workspace(
@@ -602,11 +647,27 @@ def main(argv: Optional[List[str]] = None) -> int:
         if vdir is None:
             print("cursor-agent versions dir not found. Set --cursor-agent-versions-dir or $CCM_CURSOR_AGENT_VERSIONS_DIR.")
             return 2
-        rep = patch_cursor_agent_models(
-            versions_dir=vdir,
-            dry_run=bool(getattr(args, "dry_run", False)),
-            force=bool(getattr(args, "force_patch_models", False)),
-        )
+        if bool(getattr(args, "dry_run", False)):
+            rep = patch_cursor_agent_models(
+                versions_dir=vdir,
+                dry_run=True,
+                force=bool(getattr(args, "force_patch_models", False)),
+            )
+        else:
+            agent = _patch_verification_executable_for_versions_dir(vdir)
+            if not agent:
+                print("cursor-agent executable not found for patch verification.")
+                return 2
+            try:
+                rep = apply_verified_cursor_agent_patch(
+                    versions_dir=vdir,
+                    cursor_agent_path=agent,
+                    agent_dirs=agent_dirs,
+                    force=bool(getattr(args, "force_patch_models", False)),
+                )
+            except Exception as e:
+                print(f"Error: {e}")
+                return 1
         print(f"versions dir: {vdir}")
         print(f"scanned_files: {rep.scanned_files}")
         print(f"patched_files: {len(rep.patched_files)}")

@@ -7,11 +7,12 @@ import subprocess
 import threading
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from cursor_cli_manager.update import _default_runner
-from cursor_cli_manager.agent_paths import CursorAgentDirs, get_cursor_agent_dirs
+from cursor_cli_manager.agent_paths import CursorAgentDirs, ENV_CURSOR_AGENT_CONFIG_DIR, get_cursor_agent_dirs
 from cursor_cli_manager.ccm_config import has_legacy_install
 from cursor_cli_manager.cursor_agent_install import ENV_CURSOR_AGENT_PATH, resolve_cursor_agent_installation
 
@@ -47,6 +48,15 @@ _PROBED_CURSOR_AGENT_FLAGS: Optional[List[str]] = None
 
 _OPTION_SUPPORT_LOCK = threading.Lock()
 _OPTION_SUPPORT_CACHE: Dict[Tuple[str, str], bool] = {}
+
+
+@dataclass(frozen=True)
+class LaunchSmokeResult:
+    ok: bool
+    exit_code: Optional[int]
+    elapsed_s: float
+    output: str = ""
+    launch_sustained: bool = False
 
 
 def _help_supports_flag(help_text: str, flag: str) -> bool:
@@ -201,6 +211,222 @@ def _prepare_exec_command(cmd: List[str]) -> List[str]:
     return _filter_supported_optional_flags(cmd)
 
 
+def _windows_popen_cmd(cmd: List[str]) -> List[str]:
+    popen_cmd = list(cmd)
+    if sys.platform.startswith("win") and cmd:
+        target = str(cmd[0])
+        suffix = Path(target).suffix.lower()
+        if suffix in (".cmd", ".bat"):
+            popen_cmd = ["cmd.exe", "/d", "/s", "/c", subprocess.list2cmdline(list(cmd))]
+    return popen_cmd
+
+
+def _run_cursor_agent_launch_smoke_windows(
+    cmd: List[str],
+    *,
+    cwd: Optional[Path],
+    env: Optional[Dict[str, str]],
+    startup_ok_s: float,
+    shutdown_grace_s: float,
+) -> LaunchSmokeResult:
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    started_at = time.monotonic()
+    p = subprocess.Popen(
+        _windows_popen_cmd(cmd),
+        stdin=None,
+        stdout=None,
+        stderr=None,
+        cwd=str(cwd) if cwd is not None else None,
+        creationflags=creationflags,
+        env=env,
+    )
+    try:
+        while True:
+            rc = p.poll()
+            elapsed_s = max(0.0, time.monotonic() - started_at)
+            if rc is not None:
+                return LaunchSmokeResult(ok=False, exit_code=rc, elapsed_s=elapsed_s, launch_sustained=False)
+            if elapsed_s >= startup_ok_s:
+                break
+            time.sleep(0.1)
+
+        try:
+            p.send_signal(signal.CTRL_BREAK_EVENT)  # type: ignore[attr-defined]
+        except Exception:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        deadline = time.monotonic() + max(0.1, shutdown_grace_s)
+        while p.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if p.poll() is None:
+            try:
+                p.kill()
+            except Exception:
+                pass
+            try:
+                p.wait(timeout=max(0.1, shutdown_grace_s))
+            except Exception:
+                pass
+        return LaunchSmokeResult(ok=True, exit_code=0, elapsed_s=max(0.0, time.monotonic() - started_at), launch_sustained=True)
+    finally:
+        if p.poll() is None:
+            try:
+                p.kill()
+            except Exception:
+                pass
+
+
+def _run_cursor_agent_launch_smoke_posix(
+    cmd: List[str],
+    *,
+    cwd: Optional[Path],
+    env: Optional[Dict[str, str]],
+    startup_ok_s: float,
+    shutdown_grace_s: float,
+) -> LaunchSmokeResult:
+    import errno
+    import fcntl
+    import pty
+    import select
+
+    master_fd, slave_fd = pty.openpty()
+    try:
+        flags = fcntl.fcntl(master_fd, fcntl.F_GETFL)
+        fcntl.fcntl(master_fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+    except Exception:
+        pass
+
+    started_at = time.monotonic()
+    output_chunks: List[str] = []
+    p = subprocess.Popen(
+        list(cmd),
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        cwd=str(cwd) if cwd is not None else None,
+        start_new_session=True,
+        close_fds=True,
+        env=env,
+    )
+    try:
+        os.close(slave_fd)
+    except Exception:
+        pass
+
+    def _drain_output(*, timeout_s: float = 0.0) -> None:
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while True:
+            wait_s = max(0.0, deadline - time.monotonic()) if timeout_s > 0 else 0.0
+            try:
+                r, _, _ = select.select([master_fd], [], [], wait_s)
+            except Exception:
+                break
+            if not r:
+                break
+            try:
+                chunk = os.read(master_fd, 4096)
+            except OSError as e:
+                if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    if timeout_s <= 0:
+                        break
+                    continue
+                break
+            except Exception:
+                break
+            if not chunk:
+                break
+            output_chunks.append(chunk.decode("utf-8", "replace"))
+
+    try:
+        while True:
+            _drain_output(timeout_s=0.1)
+            rc = p.poll()
+            elapsed_s = max(0.0, time.monotonic() - started_at)
+            if rc is not None:
+                _drain_output(timeout_s=0.1)
+                txt = "".join(output_chunks)
+                return LaunchSmokeResult(ok=False, exit_code=rc, elapsed_s=elapsed_s, output=txt, launch_sustained=False)
+            if elapsed_s >= startup_ok_s:
+                break
+        try:
+            os.killpg(p.pid, signal.SIGINT)
+        except Exception:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        deadline = time.monotonic() + max(0.1, shutdown_grace_s)
+        while p.poll() is None and time.monotonic() < deadline:
+            _drain_output(timeout_s=0.1)
+        if p.poll() is None:
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except Exception:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+        try:
+            p.wait(timeout=max(0.1, shutdown_grace_s))
+        except Exception:
+            pass
+        _drain_output(timeout_s=0.2)
+        return LaunchSmokeResult(
+            ok=True,
+            exit_code=0,
+            elapsed_s=max(0.0, time.monotonic() - started_at),
+            output="".join(output_chunks),
+            launch_sustained=True,
+        )
+    finally:
+        try:
+            os.close(master_fd)
+        except Exception:
+            pass
+        if p.poll() is None:
+            try:
+                p.kill()
+            except Exception:
+                pass
+
+
+def run_cursor_agent_launch_smoke(
+    *,
+    workspace_path: Path,
+    cursor_agent_path: Optional[str] = None,
+    agent_dirs: Optional[CursorAgentDirs] = None,
+    cursor_agent_config_dir: Optional[Path] = None,
+    startup_ok_s: float = _QUICK_STARTUP_FAILURE_MAX_S,
+    shutdown_grace_s: float = 2.0,
+) -> LaunchSmokeResult:
+    cmd = build_new_command(
+        workspace_path=workspace_path,
+        cursor_agent_path=cursor_agent_path,
+        agent_dirs=agent_dirs,
+    )
+    cmd = _prepare_exec_command(cmd)
+    env = dict(os.environ)
+    if cursor_agent_config_dir is not None:
+        env[ENV_CURSOR_AGENT_CONFIG_DIR] = str(cursor_agent_config_dir)
+    if sys.platform.startswith("win"):
+        return _run_cursor_agent_launch_smoke_windows(
+            cmd,
+            cwd=workspace_path,
+            env=env,
+            startup_ok_s=startup_ok_s,
+            shutdown_grace_s=shutdown_grace_s,
+        )
+    return _run_cursor_agent_launch_smoke_posix(
+        cmd,
+        cwd=workspace_path,
+        env=env,
+        startup_ok_s=startup_ok_s,
+        shutdown_grace_s=shutdown_grace_s,
+    )
+
+
 def _stderr_indicates_force_disabled(stderr_text: str) -> bool:
     text = (stderr_text or "").lower()
     return "run everything" in text and "disabled" in text and "--force" in text
@@ -270,15 +496,8 @@ def _run_cursor_agent_interactive(cmd: List[str]) -> int:
     This is used on Windows to avoid `os.execvp` behavior differences for
     `.cmd` wrappers while keeping interactive stdin/stdout/stderr semantics.
     """
-    popen_cmd = list(cmd)
-    if sys.platform.startswith("win") and cmd:
-        target = str(cmd[0])
-        suffix = Path(target).suffix.lower()
-        if suffix in (".cmd", ".bat"):
-            popen_cmd = ["cmd.exe", "/d", "/s", "/c", subprocess.list2cmdline(list(cmd))]
-
     p = subprocess.Popen(
-        popen_cmd,
+        _windows_popen_cmd(cmd),
         stdin=None,
         stdout=None,
         stderr=None,

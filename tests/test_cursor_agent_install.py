@@ -5,9 +5,13 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import cursor_cli_manager.cursor_agent_install as cai
+from cursor_cli_manager.agent_paths import CursorAgentDirs
+from cursor_cli_manager.ccm_config import CcmConfig, LEGACY_VERSION, save_ccm_config
+from cursor_cli_manager.opening import LaunchSmokeResult
 
 
 def _tar_bytes(entries: dict) -> bytes:
@@ -29,6 +33,23 @@ def _zip_bytes(entries: dict) -> bytes:
             data = payload if isinstance(payload, bytes) else payload.encode("utf-8")
             zf.writestr(name, data)
     return buf.getvalue()
+
+
+SAMPLE_PATCHABLE_JS = """
+var __awaiter = (this && this.__awaiter) || function () {};
+
+function fetchUsableModels(aiServerClient) {
+    return __awaiter(this, void 0, void 0, function* () {
+        const { models } = yield aiServerClient.getUsableModels(new KD({}));
+        return models.length > 0 ? models : undefined;
+    });
+}
+function fetchDefaultModel(aiServerClient) {
+    return __awaiter(this, void 0, void 0, function* () {
+        return null;
+    });
+}
+"""
 
 
 class TestCursorAgentInstall(unittest.TestCase):
@@ -390,12 +411,12 @@ class TestCursorAgentInstall(unittest.TestCase):
         ), patch(
             "cursor_cli_manager.cursor_agent_install._verify_cursor_agent_command"
         ), patch(
-            "cursor_cli_manager.cursor_agent_install.patch_cursor_agent_models"
-        ) as patch_models:
-            patch_models.return_value = type(
+            "cursor_cli_manager.cursor_agent_install.apply_verified_cursor_agent_patch"
+        ) as apply_patch:
+            apply_patch.return_value = type(
                 "PatchReport",
                 (),
-                {"patched_files": [Path("x")], "repaired_files": [], "errors": []},
+                {"patched_files": [Path("x")], "repaired_files": [], "errors": [], "ok": True},
             )()
             spec = cai.CursorAgentInstallSpec(
                 version="2026.02.27-e7d2ef6",
@@ -408,7 +429,134 @@ class TestCursorAgentInstall(unittest.TestCase):
             )
             res = cai.install_cursor_agent_from_spec(spec, fetch=lambda *_a, **_k: data)
             self.assertTrue(res.applied_compat_patch)
-            patch_models.assert_called_once()
+            apply_patch.assert_called_once()
+
+    def test_apply_verified_cursor_agent_patch_verifies_launch(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            versions_dir = root / "versions"
+            vdir = versions_dir / "2026.02.27-e7d2ef6"
+            vdir.mkdir(parents=True, exist_ok=True)
+            js = vdir / "1234.index.js"
+            js.write_text(SAMPLE_PATCHABLE_JS, encoding="utf-8")
+            agent = root / "bin" / "cursor-agent"
+            agent.parent.mkdir(parents=True, exist_ok=True)
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            agent_dirs = CursorAgentDirs(root / "cfg")
+            save_ccm_config(agent_dirs, CcmConfig(installed_versions=[LEGACY_VERSION]))
+
+            with patch("cursor_cli_manager.cursor_agent_install._verify_cursor_agent_command") as verify, patch(
+                "cursor_cli_manager.opening.run_cursor_agent_launch_smoke",
+                return_value=LaunchSmokeResult(ok=True, exit_code=0, elapsed_s=0.2, output="", launch_sustained=True),
+            ) as smoke:
+                rep = cai.apply_verified_cursor_agent_patch(
+                    versions_dir=versions_dir,
+                    cursor_agent_path=str(agent),
+                    agent_dirs=agent_dirs,
+                )
+
+            self.assertEqual(len(rep.patched_files), 1)
+            self.assertIn("CCM_PATCH_AVAILABLE_MODELS_NORMALIZED", js.read_text(encoding="utf-8"))
+            verify.assert_called_once_with(str(agent), timeout_s=5.0)
+            smoke.assert_called_once()
+
+    def test_apply_verified_cursor_agent_patch_ignores_unrelated_scan_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            versions_dir = root / "versions"
+            target_vdir = versions_dir / "2026.02.27-e7d2ef6"
+            other_vdir = versions_dir / "2025.12.01-deadbeef"
+            target_vdir.mkdir(parents=True, exist_ok=True)
+            other_vdir.mkdir(parents=True, exist_ok=True)
+            js = target_vdir / "1234.index.js"
+            js.write_text(SAMPLE_PATCHABLE_JS, encoding="utf-8")
+            agent = target_vdir / "cursor-agent"
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+            rep = SimpleNamespace(
+                patched_files=[js],
+                repaired_files=[],
+                errors=[(other_vdir / "broken.index.js", "read failed")],
+                ok=False,
+            )
+
+            with patch("cursor_cli_manager.cursor_agent_install.patch_cursor_agent_models", return_value=rep), patch(
+                "cursor_cli_manager.cursor_agent_install._verify_cursor_agent_command"
+            ) as verify, patch(
+                "cursor_cli_manager.opening.run_cursor_agent_launch_smoke",
+                return_value=LaunchSmokeResult(ok=True, exit_code=0, elapsed_s=0.5, output="", launch_sustained=True),
+            ) as smoke:
+                out = cai.apply_verified_cursor_agent_patch(
+                    versions_dir=versions_dir,
+                    cursor_agent_path=str(agent),
+                )
+
+            self.assertIs(out, rep)
+            verify.assert_called_once_with(str(agent), timeout_s=5.0)
+            smoke.assert_called_once()
+
+    def test_apply_verified_cursor_agent_patch_rejects_quick_clean_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            versions_dir = root / "versions"
+            vdir = versions_dir / "2026.02.27-e7d2ef6"
+            vdir.mkdir(parents=True, exist_ok=True)
+            js = vdir / "1234.index.js"
+            original = SAMPLE_PATCHABLE_JS
+            js.write_text(original, encoding="utf-8")
+            agent = root / "bin" / "cursor-agent"
+            agent.parent.mkdir(parents=True, exist_ok=True)
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+            with patch("cursor_cli_manager.cursor_agent_install._verify_cursor_agent_command") as verify, patch(
+                "cursor_cli_manager.opening.run_cursor_agent_launch_smoke",
+                return_value=LaunchSmokeResult(ok=True, exit_code=0, elapsed_s=0.1, output="ok", launch_sustained=False),
+            ):
+                with self.assertRaises(RuntimeError) as ctx:
+                    cai.apply_verified_cursor_agent_patch(
+                        versions_dir=versions_dir,
+                        cursor_agent_path=str(agent),
+                    )
+
+            self.assertIn("exited before launch verification completed", str(ctx.exception))
+            self.assertEqual(js.read_text(encoding="utf-8"), original)
+            self.assertGreaterEqual(verify.call_count, 2)
+
+    def test_apply_verified_cursor_agent_patch_rolls_back_on_launch_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            versions_dir = root / "versions"
+            vdir = versions_dir / "2026.02.27-e7d2ef6"
+            vdir.mkdir(parents=True, exist_ok=True)
+            js = vdir / "1234.index.js"
+            original = SAMPLE_PATCHABLE_JS
+            js.write_text(original, encoding="utf-8")
+            agent = root / "bin" / "cursor-agent"
+            agent.parent.mkdir(parents=True, exist_ok=True)
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+            def fail_smoke(*_args, **_kwargs):  # noqa: ANN001
+                bak = js.with_suffix(js.suffix + ".ccm.bak")
+                try:
+                    bak.unlink()
+                except FileNotFoundError:
+                    pass
+                return LaunchSmokeResult(ok=False, exit_code=2, elapsed_s=0.1, output="boom")
+
+            with patch("cursor_cli_manager.cursor_agent_install._verify_cursor_agent_command") as verify, patch(
+                "cursor_cli_manager.opening.run_cursor_agent_launch_smoke",
+                side_effect=fail_smoke,
+            ):
+                with self.assertRaises(RuntimeError) as ctx:
+                    cai.apply_verified_cursor_agent_patch(
+                        versions_dir=versions_dir,
+                        cursor_agent_path=str(agent),
+                    )
+
+            self.assertIn("patch rolled back", str(ctx.exception))
+            self.assertEqual(js.read_text(encoding="utf-8"), original)
+            self.assertFalse((versions_dir / ".ccm-patch-cache.json").exists())
+            self.assertGreaterEqual(verify.call_count, 2)
 
     def test_install_cursor_agent_rejects_missing_payload_files(self) -> None:
         data = _tar_bytes(

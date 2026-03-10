@@ -11,7 +11,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
-from cursor_cli_manager.agent_paths import CursorAgentDirs
+from cursor_cli_manager.agent_paths import CursorAgentDirs, ENV_CURSOR_AGENT_CONFIG_DIR
 from cursor_cli_manager.ccm_config import CcmConfig, LEGACY_VERSION, save_ccm_config
 from cursor_cli_manager.opening import (
     ENV_CURSOR_AGENT_PATH,
@@ -22,6 +22,7 @@ from cursor_cli_manager.opening import (
     exec_resume_chat,
     get_cursor_agent_flags,
     resolve_cursor_agent_path,
+    run_cursor_agent_launch_smoke,
     start_cursor_agent_flag_probe,
 )
 
@@ -84,6 +85,89 @@ class TestOpening(unittest.TestCase):
             self.assertIn("--workspace", cmd)
             for flag in DEFAULT_CURSOR_AGENT_FLAGS:
                 self.assertIn(flag, cmd)
+
+    @unittest.skipIf(sys.platform.startswith("win"), "POSIX-only smoke test.")
+    def test_run_cursor_agent_launch_smoke_succeeds_when_process_stays_alive(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            workspace = td_path / "ws"
+            workspace.mkdir(parents=True, exist_ok=True)
+            agent = td_path / "cursor-agent"
+            agent.write_text("#!/bin/sh\nsleep 10\n", encoding="utf-8")
+            os.chmod(agent, 0o755)
+
+            result = run_cursor_agent_launch_smoke(
+                workspace_path=workspace,
+                cursor_agent_path=str(agent),
+                startup_ok_s=0.3,
+                shutdown_grace_s=0.2,
+            )
+
+            self.assertTrue(result.ok)
+            self.assertTrue(result.launch_sustained)
+
+    @unittest.skipIf(sys.platform.startswith("win"), "POSIX-only smoke test.")
+    def test_run_cursor_agent_launch_smoke_fails_on_quick_nonzero_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            workspace = td_path / "ws"
+            workspace.mkdir(parents=True, exist_ok=True)
+            agent = td_path / "cursor-agent"
+            agent.write_text("#!/bin/sh\nexit 7\n", encoding="utf-8")
+            os.chmod(agent, 0o755)
+
+            result = run_cursor_agent_launch_smoke(
+                workspace_path=workspace,
+                cursor_agent_path=str(agent),
+                startup_ok_s=0.3,
+                shutdown_grace_s=0.2,
+            )
+
+            self.assertFalse(result.ok)
+            self.assertEqual(result.exit_code, 7)
+
+    @unittest.skipIf(sys.platform.startswith("win"), "POSIX-only smoke test.")
+    def test_run_cursor_agent_launch_smoke_fails_on_quick_clean_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            workspace = td_path / "ws"
+            workspace.mkdir(parents=True, exist_ok=True)
+            agent = td_path / "cursor-agent"
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            os.chmod(agent, 0o755)
+
+            result = run_cursor_agent_launch_smoke(
+                workspace_path=workspace,
+                cursor_agent_path=str(agent),
+                startup_ok_s=0.3,
+                shutdown_grace_s=0.2,
+            )
+
+            self.assertFalse(result.ok)
+            self.assertFalse(result.launch_sustained)
+            self.assertEqual(result.exit_code, 0)
+
+    def test_run_cursor_agent_launch_smoke_uses_isolated_config_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            workspace = td_path / "ws"
+            workspace.mkdir(parents=True, exist_ok=True)
+            cfg = td_path / "cursor-cfg"
+            agent = td_path / "cursor-agent"
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            backend_name = (
+                "cursor_cli_manager.opening._run_cursor_agent_launch_smoke_windows"
+                if sys.platform.startswith("win")
+                else "cursor_cli_manager.opening._run_cursor_agent_launch_smoke_posix"
+            )
+            with patch(backend_name, return_value=unittest.mock.Mock(ok=True)) as backend:
+                run_cursor_agent_launch_smoke(
+                    workspace_path=workspace,
+                    cursor_agent_path=str(agent),
+                    cursor_agent_config_dir=cfg,
+                )
+        env = backend.call_args.kwargs["env"]
+        self.assertEqual(env[ENV_CURSOR_AGENT_CONFIG_DIR], str(cfg))
 
     def test_build_commands_use_probed_flags_when_available(self) -> None:
         # Simulate that only one optional flag is supported.
@@ -649,4 +733,3 @@ marker.write_text("returned", encoding="utf-8")
 
 if __name__ == "__main__":
     unittest.main()
-

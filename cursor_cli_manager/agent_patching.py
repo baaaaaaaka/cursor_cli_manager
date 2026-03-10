@@ -6,7 +6,7 @@ import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from cursor_cli_manager.agent_paths import CursorAgentDirs, get_cursor_agent_dirs
 from cursor_cli_manager.ccm_config import has_legacy_install
@@ -183,6 +183,10 @@ def _patch_cache_path(versions_dir: Path) -> Path:
     return versions_dir / _PATCH_CACHE_FILENAME
 
 
+def _patch_backup_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".ccm.bak")
+
+
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -260,6 +264,44 @@ def _load_patch_cache(versions_dir: Path) -> Optional[Dict[str, Dict[str, Any]]]
 def _save_patch_cache(versions_dir: Path, files: Dict[str, Dict[str, Any]]) -> None:
     payload = {"version": _PATCH_CACHE_VERSION, "signature": _PATCH_CACHE_SIGNATURE, "files": files}
     _atomic_write_json(_patch_cache_path(versions_dir), payload)
+
+
+def rollback_cursor_agent_patch(*, versions_dir: Path, files: List[Path]) -> List[Tuple[Path, str]]:
+    errors: List[Tuple[Path, str]] = []
+    restored_any = False
+    seen: Set[str] = set()
+    for path in files:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        bak = _patch_backup_path(path)
+        if not bak.exists():
+            errors.append((path, f"rollback backup missing: {bak}"))
+            continue
+        try:
+            try:
+                st = path.stat()
+            except Exception:
+                st = None
+            data = bak.read_bytes()
+            path.write_bytes(data)
+            if st is not None:
+                try:
+                    os.chmod(path, st.st_mode)
+                except Exception:
+                    pass
+            restored_any = True
+        except Exception as e:
+            errors.append((path, f"rollback failed: {e}"))
+    if restored_any:
+        try:
+            _patch_cache_path(versions_dir).unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            errors.append((versions_dir, f"failed to clear patch cache: {e}"))
+    return errors
 
 
 @dataclass

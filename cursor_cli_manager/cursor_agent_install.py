@@ -15,7 +15,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from cursor_cli_manager.agent_patching import patch_cursor_agent_models
+from cursor_cli_manager.agent_paths import CursorAgentDirs
+from cursor_cli_manager.agent_patching import patch_cursor_agent_models, rollback_cursor_agent_patch
 from cursor_cli_manager.github_release import Fetch, _default_fetch, _safe_extract_tar_gz
 from cursor_cli_manager.update import _default_runner
 
@@ -254,6 +255,19 @@ def _latest_installed_executable(install_root: Path) -> Optional[Path]:
         exe = _version_dir_executable(version_dir)
         if exe is not None:
             return exe
+    return None
+
+
+def latest_cursor_agent_executable_in_versions_dir(versions_dir: Path) -> Optional[str]:
+    try:
+        version_dirs = [p for p in versions_dir.iterdir() if p.is_dir()]
+    except Exception:
+        return None
+    version_dirs.sort(key=lambda p: (p.name, str(p)), reverse=True)
+    for version_dir in version_dirs:
+        exe = _version_dir_executable(version_dir)
+        if exe is not None:
+            return str(exe)
     return None
 
 
@@ -528,11 +542,222 @@ def _should_apply_compat_patch() -> bool:
     return False
 
 
-def maybe_apply_postinstall_compat_patch(*, install_root: Optional[Path] = None) -> bool:
+def _summarize_patch_report(rep: object) -> str:
+    try:
+        patched = len(getattr(rep, "patched_files", []) or [])
+        repaired = len(getattr(rep, "repaired_files", []) or [])
+        errors = len(getattr(rep, "errors", []) or [])
+        return f"patched={patched} repaired={repaired} errors={errors}"
+    except Exception:
+        return "patch report unavailable"
+
+
+def _snapshot_patch_inputs(versions_dir: Path) -> Dict[str, bytes]:
+    snapshots: Dict[str, bytes] = {}
+    for path in sorted(versions_dir.glob("*/*.index.js")):
+        snapshots[str(path)] = path.read_bytes()
+    return snapshots
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    candidates = [path.expanduser()]
+    root_candidates = [root.expanduser()]
+    try:
+        candidates.append(candidates[0].resolve())
+    except Exception:
+        pass
+    try:
+        root_candidates.append(root_candidates[0].resolve())
+    except Exception:
+        pass
+    for candidate in candidates:
+        for root_candidate in root_candidates:
+            try:
+                candidate.relative_to(root_candidate)
+                return True
+            except Exception:
+                continue
+    return False
+
+
+def _target_version_dir_for_cursor_agent(*, versions_dir: Path, cursor_agent_path: str) -> Optional[Path]:
+    agent_path = Path(cursor_agent_path).expanduser()
+    candidates = [agent_path]
+    try:
+        candidates.append(agent_path.resolve())
+    except Exception:
+        pass
+    for candidate in candidates:
+        parent = candidate.parent
+        if parent != versions_dir and _path_is_within(parent, versions_dir):
+            return parent
+    latest = latest_cursor_agent_executable_in_versions_dir(versions_dir)
+    if not latest:
+        return None
+    return Path(latest).parent
+
+
+def _relevant_patch_errors(*, versions_dir: Path, cursor_agent_path: str, rep: object) -> List[Tuple[Path, str]]:
+    errors = list(getattr(rep, "errors", []) or [])
+    if not errors:
+        return []
+    target_version_dir = _target_version_dir_for_cursor_agent(
+        versions_dir=versions_dir,
+        cursor_agent_path=cursor_agent_path,
+    )
+    if target_version_dir is None:
+        return errors
+    relevant: List[Tuple[Path, str]] = []
+    for path, message in errors:
+        if path == versions_dir:
+            relevant.append((path, message))
+            continue
+        if _path_is_within(path, versions_dir) and not _path_is_within(path, target_version_dir):
+            continue
+        relevant.append((path, message))
+    return relevant
+
+
+def _verify_patched_cursor_agent_launch(
+    *,
+    versions_dir: Path,
+    cursor_agent_path: str,
+    agent_dirs: Optional[CursorAgentDirs] = None,
+) -> None:
+    from cursor_cli_manager.opening import run_cursor_agent_launch_smoke
+
+    _verify_cursor_agent_command(cursor_agent_path, timeout_s=5.0)
+    smoke_root = Path(tempfile.mkdtemp(prefix=".ccm-launch-smoke-", dir=str(versions_dir.parent)))
+    try:
+        workspace = smoke_root / "workspace"
+        config_dir = smoke_root / "cursor-config"
+        workspace.mkdir(parents=True, exist_ok=True)
+        config_dir.mkdir(parents=True, exist_ok=True)
+        smoke = run_cursor_agent_launch_smoke(
+            workspace_path=workspace,
+            cursor_agent_path=cursor_agent_path,
+            agent_dirs=agent_dirs,
+            cursor_agent_config_dir=config_dir,
+        )
+    finally:
+        try:
+            shutil.rmtree(smoke_root)
+        except Exception:
+            pass
+    if smoke.ok and smoke.launch_sustained:
+        return
+    detail = (smoke.output or "").strip()
+    suffix = f": {detail}" if detail else ""
+    if not smoke.launch_sustained:
+        raise RuntimeError(
+            f"patched cursor-agent exited before launch verification completed (exit {smoke.exit_code}, elapsed {smoke.elapsed_s:.2f}s){suffix}"
+        )
+    raise RuntimeError(
+        f"patched cursor-agent failed launch verification (exit {smoke.exit_code}, elapsed {smoke.elapsed_s:.2f}s){suffix}"
+    )
+
+
+def _rollback_patched_cursor_agent(
+    *,
+    versions_dir: Path,
+    rep: object,
+    snapshots: Optional[Dict[str, bytes]] = None,
+) -> str:
+    files = list(getattr(rep, "patched_files", []) or [])
+    if not files:
+        return ""
+    errors: List[Tuple[Path, str]] = []
+    restored_any = False
+    if snapshots:
+        for path in files:
+            data = snapshots.get(str(path))
+            if data is None:
+                errors.append((path, "rollback snapshot missing"))
+                continue
+            try:
+                try:
+                    st = path.stat()
+                except Exception:
+                    st = None
+                path.write_bytes(data)
+                if st is not None:
+                    try:
+                        os.chmod(path, st.st_mode)
+                    except Exception:
+                        pass
+                restored_any = True
+            except Exception as e:
+                errors.append((path, f"rollback failed: {e}"))
+        if restored_any:
+            try:
+                (versions_dir / ".ccm-patch-cache.json").unlink()
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                errors.append((versions_dir, f"failed to clear patch cache: {e}"))
+    else:
+        errors = rollback_cursor_agent_patch(versions_dir=versions_dir, files=files)
+    if errors:
+        return "; rollback errors: " + "; ".join(f"{p}: {e}" for p, e in errors[:5])
+    return "; patch rolled back"
+
+
+def apply_verified_cursor_agent_patch(
+    *,
+    versions_dir: Path,
+    cursor_agent_path: str,
+    agent_dirs: Optional[CursorAgentDirs] = None,
+    force: bool = False,
+    require_changes: bool = False,
+) -> object:
+    snapshots = _snapshot_patch_inputs(versions_dir)
+    rep = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False, force=force)
+    changed = bool(getattr(rep, "patched_files", None) or getattr(rep, "repaired_files", None))
+    relevant_errors = _relevant_patch_errors(
+        versions_dir=versions_dir,
+        cursor_agent_path=cursor_agent_path,
+        rep=rep,
+    )
+    if relevant_errors:
+        rollback_note = (
+            _rollback_patched_cursor_agent(versions_dir=versions_dir, rep=rep, snapshots=snapshots) if changed else ""
+        )
+        raise RuntimeError(f"cursor-agent patch failed ({_summarize_patch_report(rep)}){rollback_note}")
+    if require_changes and not changed:
+        raise RuntimeError(f"cursor-agent patch made no changes ({_summarize_patch_report(rep)})")
+    if not changed:
+        return rep
+    try:
+        _verify_patched_cursor_agent_launch(
+            versions_dir=versions_dir,
+            cursor_agent_path=cursor_agent_path,
+            agent_dirs=agent_dirs,
+        )
+        return rep
+    except Exception as e:
+        rollback_note = _rollback_patched_cursor_agent(versions_dir=versions_dir, rep=rep, snapshots=snapshots)
+        try:
+            _verify_cursor_agent_command(cursor_agent_path, timeout_s=5.0)
+        except Exception as rollback_exc:
+            rollback_note += f"; rollback verification failed: {rollback_exc}"
+        raise RuntimeError(f"{e}{rollback_note}")
+
+
+def maybe_apply_postinstall_compat_patch(
+    *,
+    install_root: Optional[Path] = None,
+    cursor_agent_path: Optional[str] = None,
+) -> bool:
     if not _should_apply_compat_patch():
         return False
     versions_dir = _versions_dir(install_root or get_cursor_agent_install_root())
-    rep = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False)
+    agent_path = cursor_agent_path or str(_latest_installed_executable(install_root or get_cursor_agent_install_root()) or "")
+    if not agent_path:
+        raise RuntimeError("cursor-agent executable not found for postinstall patch verification")
+    rep = apply_verified_cursor_agent_patch(
+        versions_dir=versions_dir,
+        cursor_agent_path=agent_path,
+    )
     return bool(rep.patched_files or rep.repaired_files)
 
 
@@ -586,7 +811,10 @@ def install_cursor_agent_from_spec(
         if _latest_installed_executable(install_root) is not None:
             repaired, installed_path = _repair_launchers(spec)
             _verify_cursor_agent_command(installed_path, timeout_s=min(5.0, timeout))
-            applied_patch = maybe_apply_postinstall_compat_patch(install_root=install_root)
+            applied_patch = maybe_apply_postinstall_compat_patch(
+                install_root=install_root,
+                cursor_agent_path=installed_path,
+            )
             return CursorAgentInstallResult(
                 installed_path=installed_path,
                 version=spec.version,
@@ -626,7 +854,10 @@ def install_cursor_agent_from_spec(
 
             installed_path = _install_launchers(spec, target=version_dir / exe_name)
             _verify_cursor_agent_command(installed_path, timeout_s=min(5.0, timeout))
-            applied_patch = maybe_apply_postinstall_compat_patch(install_root=install_root)
+            applied_patch = maybe_apply_postinstall_compat_patch(
+                install_root=install_root,
+                cursor_agent_path=installed_path,
+            )
             notes.append(f"installed {spec.version}")
             return CursorAgentInstallResult(
                 installed_path=installed_path,

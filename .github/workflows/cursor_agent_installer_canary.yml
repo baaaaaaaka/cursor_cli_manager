@@ -3,11 +3,23 @@ name: cursor-agent-installer-canary
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 4 * * *"
+    - cron: "0 */4 * * *"
+
+permissions:
+  contents: read
+  issues: write
 
 jobs:
   canary:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+          - os: macos-15-intel
+          - os: macos-latest
+          - os: windows-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -15,10 +27,81 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Validate upstream installer metadata
+      - name: Validate latest upstream patch + launch
         run: |
-          set -euxo pipefail
           python -m pip install -U "setuptools<69" wheel
           python -m pip install -U pip
           python -m pip install -e .
-          python scripts/check_cursor_agent_installer_canary.py
+          python scripts/run_cursor_agent_patch_canary.py
+
+  notify_issue:
+    if: ${{ always() && github.event_name == 'schedule' }}
+    needs:
+      - canary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Open or close upstream canary issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const title = "Upstream cursor cli patch canary failing";
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner,
+              repo,
+              run_id: context.runId,
+              per_page: 100,
+            });
+            const failed = jobs.filter((job) => job.name.startsWith("canary") && job.conclusion !== "success");
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "open",
+              per_page: 100,
+            });
+            const existing = issues.find((issue) => issue.title === title);
+
+            if (failed.length > 0) {
+              const failingJobs = failed.map((job) => `- ${job.name}: ${job.html_url}`).join("\n");
+              const body = [
+                "Latest scheduled upstream cursor cli patch canary failed.",
+                "",
+                `Run: ${runUrl}`,
+                "",
+                "Failed jobs:",
+                failingJobs,
+              ].join("\n");
+              if (existing) {
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: existing.number,
+                  body,
+                });
+              } else {
+                await github.rest.issues.create({
+                  owner,
+                  repo,
+                  title,
+                  body,
+                });
+              }
+              return;
+            }
+
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: existing.number,
+                body: `Scheduled upstream canary is green again: ${runUrl}`,
+              });
+              await github.rest.issues.update({
+                owner,
+                repo,
+                issue_number: existing.number,
+                state: "closed",
+              });
+            }
