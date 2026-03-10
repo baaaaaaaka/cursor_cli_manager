@@ -166,7 +166,7 @@ class TestOpening(unittest.TestCase):
                     cursor_agent_path=str(agent),
                     cursor_agent_config_dir=cfg,
                 )
-        env = backend.call_args.kwargs["env"]
+        env = backend.call_args[1]["env"]
         self.assertEqual(env[ENV_CURSOR_AGENT_CONFIG_DIR], str(cfg))
 
     def test_build_commands_use_probed_flags_when_available(self) -> None:

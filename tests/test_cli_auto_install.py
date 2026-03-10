@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import cursor_cli_manager.cli as cli
 from cursor_cli_manager.agent_paths import CursorAgentDirs
 from cursor_cli_manager.cli import cmd_tui, main
 from cursor_cli_manager.models import AgentWorkspace
@@ -48,6 +49,38 @@ class TestCliAutoInstall(unittest.TestCase):
         self.assertEqual(rc, 1)
         apply_patch.assert_called_once()
         run_tui.assert_not_called()
+
+    def test_cmd_tui_returns_0_when_tui_selection_is_empty(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            agent_dirs = CursorAgentDirs(Path(td) / "cfg")
+            ws = AgentWorkspace(cwd_hash="h", workspace_path=Path("/tmp/ws"), chats_root=Path("/tmp/chats/h"))
+            with patch("cursor_cli_manager.cli.preferred_linux_asset_switch", return_value=None), patch(
+                "cursor_cli_manager.cli._ensure_cursor_agent_for_command", return_value="/tmp/cursor-agent"
+            ), patch("cursor_cli_manager.cli.has_legacy_install", return_value=False), patch(
+                "cursor_cli_manager.cli.discover_agent_workspaces", return_value=[ws]
+            ), patch(
+                "cursor_cli_manager.cli._pin_cwd_workspace", return_value=[ws]
+            ), patch(
+                "cursor_cli_manager.cli._run_tui", return_value=None
+            ):
+                rc = cmd_tui(agent_dirs)
+        self.assertEqual(rc, 0)
+
+    def test_cmd_tui_returns_1_for_unknown_workspace_path_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            agent_dirs = CursorAgentDirs(Path(td) / "cfg")
+            ws = AgentWorkspace(cwd_hash="h", workspace_path=None, chats_root=Path("/tmp/chats/h"))
+            with patch("cursor_cli_manager.cli.preferred_linux_asset_switch", return_value=None), patch(
+                "cursor_cli_manager.cli._ensure_cursor_agent_for_command", return_value="/tmp/cursor-agent"
+            ), patch("cursor_cli_manager.cli.has_legacy_install", return_value=False), patch(
+                "cursor_cli_manager.cli.discover_agent_workspaces", return_value=[ws]
+            ), patch(
+                "cursor_cli_manager.cli._pin_cwd_workspace", return_value=[ws]
+            ), patch(
+                "cursor_cli_manager.cli._run_tui", return_value=(ws, None)
+            ):
+                rc = cmd_tui(agent_dirs)
+        self.assertEqual(rc, 1)
 
     def test_list_does_not_trigger_auto_install(self) -> None:
         out = io.StringIO()
@@ -179,6 +212,53 @@ class TestCliAutoInstall(unittest.TestCase):
         ensure.assert_called_once_with(allow_install=True)
         exec_resume.assert_not_called()
 
+    def test_cmd_open_requires_workspace(self) -> None:
+        rc = cli.cmd_open(CursorAgentDirs(Path("/tmp/cfg")), "abc123", workspace_path=None, dry_run=False)
+        self.assertEqual(rc, 2)
+
+    def test_cmd_open_returns_1_when_patch_verification_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            agent_dirs = CursorAgentDirs(Path(td) / "cfg")
+            with patch("cursor_cli_manager.cli.learn_workspace_path"), patch(
+                "cursor_cli_manager.cli._ensure_cursor_agent_for_command", return_value="/tmp/cursor-agent"
+            ), patch(
+                "cursor_cli_manager.cli.resolve_cursor_agent_versions_dir", return_value=Path(td) / "versions"
+            ), patch(
+                "cursor_cli_manager.cli._apply_patch_for_command", return_value=False
+            ) as apply_patch, patch("cursor_cli_manager.cli.exec_resume_chat") as exec_resume:
+                rc = cli.cmd_open(
+                    agent_dirs,
+                    "abc123",
+                    workspace_path=Path("/tmp/ws"),
+                    dry_run=False,
+                    patch_models=True,
+                )
+        self.assertEqual(rc, 1)
+        apply_patch.assert_called_once()
+        exec_resume.assert_not_called()
+
+    def test_cmd_open_patch_models_success_execs_resume(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            agent_dirs = CursorAgentDirs(Path(td) / "cfg")
+            with patch("cursor_cli_manager.cli.learn_workspace_path"), patch(
+                "cursor_cli_manager.cli._ensure_cursor_agent_for_command", return_value="/tmp/cursor-agent"
+            ), patch(
+                "cursor_cli_manager.cli.resolve_cursor_agent_versions_dir", return_value=Path(td) / "versions"
+            ), patch(
+                "cursor_cli_manager.cli._apply_patch_for_command", return_value=True
+            ) as apply_patch, patch(
+                "cursor_cli_manager.cli.exec_resume_chat", side_effect=SystemExit(0)
+            ):
+                with self.assertRaises(SystemExit):
+                    cli.cmd_open(
+                        agent_dirs,
+                        "abc123",
+                        workspace_path=Path("/tmp/ws"),
+                        dry_run=False,
+                        patch_models=True,
+                    )
+        apply_patch.assert_called_once()
+
     def test_ensure_cursor_agent_for_command_reports_error(self) -> None:
         err = io.StringIO()
         with patch("cursor_cli_manager.cli.ensure_cursor_agent_available", side_effect=RuntimeError("boom")), redirect_stderr(err):
@@ -187,6 +267,72 @@ class TestCliAutoInstall(unittest.TestCase):
             result = _ensure_cursor_agent_for_command(allow_install=True)
         self.assertIsNone(result)
         self.assertIn("boom", err.getvalue())
+
+    def test_apply_patch_for_command_prints_repair_note(self) -> None:
+        out = io.StringIO()
+        rep = SimpleNamespace(repaired_files=[Path("a.js"), Path("b.js")])
+        with patch("cursor_cli_manager.cli.apply_verified_cursor_agent_patch", return_value=rep) as apply_patch, redirect_stdout(out):
+            ok = cli._apply_patch_for_command(
+                versions_dir=Path("/tmp/versions"),
+                cursor_agent_path="/tmp/cursor-agent",
+                agent_dirs=CursorAgentDirs(Path("/tmp/cfg")),
+                force_patch_models=True,
+            )
+        self.assertTrue(ok)
+        self.assertIn("repaired 2 file(s)", out.getvalue())
+        self.assertEqual(apply_patch.call_args[1]["force"], True)
+
+    def test_apply_patch_for_command_reports_error(self) -> None:
+        err = io.StringIO()
+        with patch(
+            "cursor_cli_manager.cli.apply_verified_cursor_agent_patch", side_effect=RuntimeError("patch boom")
+        ), redirect_stderr(err):
+            ok = cli._apply_patch_for_command(
+                versions_dir=Path("/tmp/versions"),
+                cursor_agent_path="/tmp/cursor-agent",
+                agent_dirs=CursorAgentDirs(Path("/tmp/cfg")),
+                force_patch_models=False,
+            )
+        self.assertFalse(ok)
+        self.assertIn("patch boom", err.getvalue())
+
+    def test_patch_verification_executable_prefers_versions_dir_executable(self) -> None:
+        with patch(
+            "cursor_cli_manager.cli.latest_cursor_agent_executable_in_versions_dir",
+            return_value="/tmp/from-vdir/cursor-agent",
+        ) as latest, patch("cursor_cli_manager.cli.resolve_cursor_agent_path") as resolve_path:
+            agent = cli._patch_verification_executable_for_versions_dir(Path("/tmp/versions"))
+        self.assertEqual(agent, "/tmp/from-vdir/cursor-agent")
+        latest.assert_called_once()
+        resolve_path.assert_not_called()
+
+    def test_patch_verification_executable_falls_back_to_current_matching_versions_dir(self) -> None:
+        with patch(
+            "cursor_cli_manager.cli.latest_cursor_agent_executable_in_versions_dir",
+            return_value=None,
+        ), patch(
+            "cursor_cli_manager.cli.resolve_cursor_agent_path",
+            return_value="/tmp/current/cursor-agent",
+        ), patch(
+            "cursor_cli_manager.cli.resolve_cursor_agent_versions_dir",
+            return_value=Path("/tmp/versions"),
+        ):
+            agent = cli._patch_verification_executable_for_versions_dir(Path("/tmp/versions"))
+        self.assertEqual(agent, "/tmp/current/cursor-agent")
+
+    def test_patch_verification_executable_returns_none_for_mismatched_current_agent(self) -> None:
+        with patch(
+            "cursor_cli_manager.cli.latest_cursor_agent_executable_in_versions_dir",
+            return_value=None,
+        ), patch(
+            "cursor_cli_manager.cli.resolve_cursor_agent_path",
+            return_value="/tmp/current/cursor-agent",
+        ), patch(
+            "cursor_cli_manager.cli.resolve_cursor_agent_versions_dir",
+            return_value=Path("/tmp/other-versions"),
+        ):
+            agent = cli._patch_verification_executable_for_versions_dir(Path("/tmp/versions"))
+        self.assertIsNone(agent)
 
     def test_patch_models_uses_executable_from_explicit_versions_dir(self) -> None:
         out = io.StringIO()
@@ -212,7 +358,7 @@ class TestCliAutoInstall(unittest.TestCase):
         ) as apply_patch, redirect_stdout(out):
             rc = main(["--config-dir", td, "--cursor-agent-versions-dir", td, "patch-models"])
         self.assertEqual(rc, 0)
-        self.assertEqual(apply_patch.call_args.kwargs["cursor_agent_path"], "/tmp/from-vdir/cursor-agent")
+        self.assertEqual(apply_patch.call_args[1]["cursor_agent_path"], "/tmp/from-vdir/cursor-agent")
 
     def test_patch_models_uses_executable_from_env_selected_versions_dir(self) -> None:
         out = io.StringIO()
@@ -242,7 +388,54 @@ class TestCliAutoInstall(unittest.TestCase):
             (Path(td) / "versions").mkdir(parents=True, exist_ok=True)
             rc = main(["--config-dir", td, "patch-models"])
         self.assertEqual(rc, 0)
-        self.assertEqual(apply_patch.call_args.kwargs["cursor_agent_path"], "/tmp/from-env/cursor-agent")
+        self.assertEqual(apply_patch.call_args[1]["cursor_agent_path"], "/tmp/from-env/cursor-agent")
+
+    def test_patch_models_returns_0_without_legacy_install(self) -> None:
+        with tempfile.TemporaryDirectory() as td, patch("cursor_cli_manager.cli.has_legacy_install", return_value=False):
+            rc = main(["--config-dir", td, "patch-models"])
+        self.assertEqual(rc, 0)
+
+    def test_patch_models_returns_2_when_versions_dir_missing(self) -> None:
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as td, patch(
+            "cursor_cli_manager.cli.has_legacy_install", return_value=True
+        ), patch(
+            "cursor_cli_manager.cli.resolve_cursor_agent_versions_dir", return_value=None
+        ), redirect_stdout(out):
+            rc = main(["--config-dir", td, "patch-models"])
+        self.assertEqual(rc, 2)
+        self.assertIn("versions dir not found", out.getvalue())
+
+    def test_patch_models_returns_2_when_verification_executable_missing(self) -> None:
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as td, patch(
+            "cursor_cli_manager.cli.has_legacy_install", return_value=True
+        ), patch(
+            "cursor_cli_manager.cli.resolve_cursor_agent_versions_dir", return_value=Path(td) / "versions"
+        ), patch(
+            "cursor_cli_manager.cli.latest_cursor_agent_executable_in_versions_dir", return_value=None
+        ), patch(
+            "cursor_cli_manager.cli.resolve_cursor_agent_path", return_value=None
+        ), redirect_stdout(out):
+            rc = main(["--config-dir", td, "patch-models"])
+        self.assertEqual(rc, 2)
+        self.assertIn("executable not found", out.getvalue())
+
+    def test_patch_models_returns_1_when_verified_patch_fails(self) -> None:
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as td, patch(
+            "cursor_cli_manager.cli.has_legacy_install", return_value=True
+        ), patch(
+            "cursor_cli_manager.cli.resolve_cursor_agent_versions_dir", return_value=Path(td) / "versions"
+        ), patch(
+            "cursor_cli_manager.cli.latest_cursor_agent_executable_in_versions_dir",
+            return_value="/tmp/from-vdir/cursor-agent",
+        ), patch(
+            "cursor_cli_manager.cli.apply_verified_cursor_agent_patch", side_effect=RuntimeError("verify failed")
+        ), redirect_stdout(out):
+            rc = main(["--config-dir", td, "patch-models"])
+        self.assertEqual(rc, 1)
+        self.assertIn("verify failed", out.getvalue())
 
 
 if __name__ == "__main__":
