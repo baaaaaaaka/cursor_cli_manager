@@ -647,7 +647,18 @@ def _verify_patched_cursor_agent_launch(
     if smoke.ok and smoke.launch_sustained:
         return
     detail = (smoke.output or "").strip()
+    detail_lc = detail.lower()
     suffix = f": {detail}" if detail else ""
+    if (
+        (not smoke.launch_sustained)
+        and detail
+        and (
+            "authentication required" in detail_lc
+            or "agent login" in detail_lc
+            or "cursor_api_key" in detail_lc
+        )
+    ):
+        return
     if not smoke.launch_sustained:
         raise RuntimeError(
             f"patched cursor-agent exited before launch verification completed (exit {smoke.exit_code}, elapsed {smoke.elapsed_s:.2f}s){suffix}"

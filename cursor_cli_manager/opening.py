@@ -233,19 +233,36 @@ def _run_cursor_agent_launch_smoke_windows(
     started_at = time.monotonic()
     p = subprocess.Popen(
         _windows_popen_cmd(cmd),
-        stdin=None,
-        stdout=None,
-        stderr=None,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         cwd=str(cwd) if cwd is not None else None,
         creationflags=creationflags,
         env=env,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
+
+    def _collect_output(*, timeout_s: float = 0.2) -> str:
+        try:
+            out, _ = p.communicate(timeout=max(0.1, timeout_s))
+            return out or ""
+        except subprocess.TimeoutExpired:
+            return ""
+
     try:
         while True:
             rc = p.poll()
             elapsed_s = max(0.0, time.monotonic() - started_at)
             if rc is not None:
-                return LaunchSmokeResult(ok=False, exit_code=rc, elapsed_s=elapsed_s, launch_sustained=False)
+                return LaunchSmokeResult(
+                    ok=False,
+                    exit_code=rc,
+                    elapsed_s=elapsed_s,
+                    output=_collect_output(),
+                    launch_sustained=False,
+                )
             if elapsed_s >= startup_ok_s:
                 break
             time.sleep(0.1)
@@ -269,7 +286,13 @@ def _run_cursor_agent_launch_smoke_windows(
                 p.wait(timeout=max(0.1, shutdown_grace_s))
             except Exception:
                 pass
-        return LaunchSmokeResult(ok=True, exit_code=0, elapsed_s=max(0.0, time.monotonic() - started_at), launch_sustained=True)
+        return LaunchSmokeResult(
+            ok=True,
+            exit_code=0,
+            elapsed_s=max(0.0, time.monotonic() - started_at),
+            output=_collect_output(timeout_s=shutdown_grace_s),
+            launch_sustained=True,
+        )
     finally:
         if p.poll() is None:
             try:

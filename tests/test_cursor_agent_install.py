@@ -522,6 +522,37 @@ class TestCursorAgentInstall(unittest.TestCase):
             self.assertEqual(js.read_text(encoding="utf-8"), original)
             self.assertGreaterEqual(verify.call_count, 2)
 
+    def test_apply_verified_cursor_agent_patch_accepts_auth_required_launch_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            versions_dir = root / "versions"
+            vdir = versions_dir / "2026.02.27-e7d2ef6"
+            vdir.mkdir(parents=True, exist_ok=True)
+            js = vdir / "1234.index.js"
+            js.write_text(SAMPLE_PATCHABLE_JS, encoding="utf-8")
+            agent = root / "bin" / "cursor-agent"
+            agent.parent.mkdir(parents=True, exist_ok=True)
+            agent.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+            with patch("cursor_cli_manager.cursor_agent_install._verify_cursor_agent_command") as verify, patch(
+                "cursor_cli_manager.opening.run_cursor_agent_launch_smoke",
+                return_value=LaunchSmokeResult(
+                    ok=False,
+                    exit_code=1,
+                    elapsed_s=0.1,
+                    output="Authentication required. Please run 'agent login' first.",
+                    launch_sustained=False,
+                ),
+            ) as smoke:
+                rep = cai.apply_verified_cursor_agent_patch(
+                    versions_dir=versions_dir,
+                    cursor_agent_path=str(agent),
+                )
+
+            self.assertEqual(len(rep.patched_files), 1)
+            verify.assert_called_once_with(str(agent), timeout_s=5.0)
+            smoke.assert_called_once()
+
     def test_apply_verified_cursor_agent_patch_rolls_back_on_launch_failure(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
