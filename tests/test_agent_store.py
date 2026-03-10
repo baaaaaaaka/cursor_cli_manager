@@ -381,7 +381,122 @@ class TestAgentStore(unittest.TestCase):
                 self.assertEqual(init1, [("user", "first")])
                 self.assertEqual(calls["n"], 0)
 
+    def test_with_ro_connection_falls_back_to_second_uri(self) -> None:
+        db = Path("/tmp/store.db")
+        con = mock.Mock()
+        seen_uris = []
+
+        def fake_connect(db_uri: str, *, uri: bool, timeout: float):  # type: ignore[override]
+            seen_uris.append((db_uri, timeout, uri))
+            if len(seen_uris) == 1:
+                raise sqlite3.OperationalError("first failed")
+            return con
+
+        with mock.patch.object(agent_store.sqlite3, "connect", side_effect=fake_connect), mock.patch.object(
+            agent_store, "_tune_readonly_connection"
+        ) as tune:
+            out = agent_store._with_ro_connection(db, lambda current: f"ok:{id(current)}")
+
+        self.assertIsInstance(out, str)
+        self.assertEqual(len(seen_uris), 2)
+        self.assertEqual(seen_uris[0][0], agent_store._connect_ro_uris(db)[0])
+        self.assertEqual(seen_uris[1][0], agent_store._connect_ro_uris(db)[1])
+        self.assertTrue(seen_uris[1][2])
+        tune.assert_called_once_with(con)
+        con.close.assert_called_once()
+
+    def test_read_chat_meta_from_key_value_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "store.db"
+            con = sqlite3.connect(db)
+            con.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);")
+            con.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value);")
+            con.execute("INSERT INTO meta(key, value) VALUES(?, ?);", ("agentId", "chat-2"))
+            con.execute("INSERT INTO meta(key, value) VALUES(?, ?);", ("latestRootBlobId", "root-2"))
+            con.execute("INSERT INTO meta(key, value) VALUES(?, ?);", ("name", "KV Chat"))
+            con.execute("INSERT INTO meta(key, value) VALUES(?, ?);", ("mode", "default"))
+            con.execute("INSERT INTO meta(key, value) VALUES(?, ?);", ("createdAt", 456))
+            con.commit()
+            con.close()
+
+            meta = read_chat_meta(db)
+
+            assert meta is not None
+            self.assertEqual(meta.agent_id, "chat-2")
+            self.assertEqual(meta.latest_root_blob_id, "root-2")
+            self.assertEqual(meta.name, "KV Chat")
+            self.assertEqual(meta.mode, "default")
+            self.assertEqual(meta.created_at_ms, 456)
+
+    def test_iter_embedded_json_objects_skips_truncated_json(self) -> None:
+        blob = (
+            b"xx"
+            + json.dumps({"role": "user", "content": "ok"}, separators=(",", ":")).encode("utf-8")
+            + b"yy{\"role\":\"assistant\""
+        )
+
+        objs = list(agent_store._iter_embedded_json_objects(blob, max_objects=10))
+
+        self.assertEqual(objs, [{"role": "user", "content": "ok"}])
+
+    def test_extract_messages_fallback_filters_user_info_and_duplicates(self) -> None:
+        con = sqlite3.connect(":memory:")
+        con.execute("CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB);")
+
+        def _msg(role: str, text: str) -> bytes:
+            return json.dumps(
+                {"role": role, "content": [{"type": "text", "text": text}]},
+                separators=(",", ":"),
+            ).encode("utf-8")
+
+        blob = b"\n".join(
+            [
+                _msg("user", "<user_info>skip me"),
+                _msg("user", "hello"),
+                _msg("assistant", "world"),
+                _msg("assistant", "world"),
+            ]
+        )
+        con.execute("INSERT INTO blobs(id, data) VALUES(?, ?);", ("b1", blob))
+        con.commit()
+
+        with mock.patch.object(agent_store, "_iter_message_objects_role_anchored", return_value=iter(())):
+            msgs = agent_store._extract_messages_from_connection(
+                con,
+                max_messages=None,
+                max_blobs=None,
+                roles=("user", "assistant"),
+                from_start=False,
+            )
+
+        self.assertEqual(msgs, [("user", "hello"), ("assistant", "world")])
+        con.close()
+
+    def test_format_messages_preview_truncates_and_labels_unknown_role(self) -> None:
+        txt = agent_store.format_messages_preview(
+            [("system", "abcdef"), ("assistant", "ok")],
+            max_chars_per_message=4,
+        )
+
+        self.assertEqual(txt, "system:\nabc…\n\nAssistant:\nok")
+
+    def test_read_chat_meta_and_preview_without_root_returns_meta_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "store.db"
+            _make_store_db(
+                db,
+                meta_obj={"agentId": "chat-3", "name": "No Root"},
+                blob_id="unused",
+                blob_data=b"",
+            )
+
+            meta, role, text = read_chat_meta_and_preview(db)
+
+            assert meta is not None
+            self.assertEqual(meta.agent_id, "chat-3")
+            self.assertIsNone(role)
+            self.assertIsNone(text)
+
 
 if __name__ == "__main__":
     unittest.main()
-

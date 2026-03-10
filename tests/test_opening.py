@@ -169,6 +169,67 @@ class TestOpening(unittest.TestCase):
         env = backend.call_args[1]["env"]
         self.assertEqual(env[ENV_CURSOR_AGENT_CONFIG_DIR], str(cfg))
 
+    def test_run_cursor_agent_launch_smoke_windows_reports_quick_exit_output(self) -> None:
+        import cursor_cli_manager.opening as opening
+
+        proc = unittest.mock.Mock()
+        proc.poll.side_effect = [7, 7]
+        proc.communicate.return_value = ("boom\n", None)
+
+        with patch("cursor_cli_manager.opening.subprocess.Popen", return_value=proc), patch(
+            "cursor_cli_manager.opening.time.monotonic",
+            side_effect=[0.0, 0.05],
+        ):
+            result = opening._run_cursor_agent_launch_smoke_windows(
+                ["cursor-agent.cmd", "--workspace", "C:\\tmp\\ws"],
+                cwd=Path("C:/tmp/ws"),
+                env={"X": "1"},
+                startup_ok_s=0.3,
+                shutdown_grace_s=0.2,
+            )
+
+        self.assertFalse(result.ok)
+        self.assertFalse(result.launch_sustained)
+        self.assertEqual(result.exit_code, 7)
+        self.assertEqual(result.output, "boom\n")
+        proc.send_signal.assert_not_called()
+
+    def test_run_cursor_agent_launch_smoke_windows_succeeds_after_startup_window(self) -> None:
+        import cursor_cli_manager.opening as opening
+
+        proc = unittest.mock.Mock()
+        polls = {"n": 0}
+
+        def fake_poll():
+            polls["n"] += 1
+            return None if polls["n"] <= 3 else 0
+
+        proc.poll.side_effect = fake_poll
+        proc.communicate.return_value = ("shutting down\n", None)
+
+        with patch("cursor_cli_manager.opening.subprocess.Popen", return_value=proc), patch(
+            "cursor_cli_manager.opening.time.sleep"
+        ), patch(
+            "cursor_cli_manager.opening.time.monotonic",
+            side_effect=[0.0, 0.1, 0.35, 0.36, 0.45, 0.5],
+        ), patch.object(
+            opening.signal, "CTRL_BREAK_EVENT", 123, create=True
+        ):
+            result = opening._run_cursor_agent_launch_smoke_windows(
+                ["cursor-agent.cmd", "--workspace", "C:\\tmp\\ws"],
+                cwd=Path("C:/tmp/ws"),
+                env=None,
+                startup_ok_s=0.3,
+                shutdown_grace_s=0.2,
+            )
+
+        self.assertTrue(result.ok)
+        self.assertTrue(result.launch_sustained)
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.output, "shutting down\n")
+        proc.send_signal.assert_called_once_with(123)
+        proc.kill.assert_not_called()
+
     def test_build_commands_use_probed_flags_when_available(self) -> None:
         # Simulate that only one optional flag is supported.
         import cursor_cli_manager.opening as opening

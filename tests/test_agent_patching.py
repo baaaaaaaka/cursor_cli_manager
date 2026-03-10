@@ -11,6 +11,7 @@ from cursor_cli_manager.agent_patching import (
     ENV_CURSOR_AGENT_VERSIONS_DIR,
     _patch_auto_run_controls,
     patch_cursor_agent_models,
+    rollback_cursor_agent_patch,
     resolve_cursor_agent_versions_dir,
     should_patch_models,
 )
@@ -237,6 +238,47 @@ class TestAgentPatching(unittest.TestCase):
             self.assertEqual(len(rep2.patched_files), 0)
             self.assertEqual(rep2.skipped_already_patched, 1)
             self.assertEqual(rep2.skipped_cached, 1)
+
+    def test_rollback_cursor_agent_patch_restores_once_and_clears_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            versions_dir = Path(td) / "versions"
+            vdir = versions_dir / "test-version"
+            vdir.mkdir(parents=True, exist_ok=True)
+            js = vdir / "8658.index.js"
+            js.write_text("original\n", encoding="utf-8")
+            bak = js.with_suffix(js.suffix + ".ccm.bak")
+            bak.write_text("backup\n", encoding="utf-8")
+            js.write_text("patched\n", encoding="utf-8")
+            cache = versions_dir / ".ccm-patch-cache.json"
+            cache.write_text("{}", encoding="utf-8")
+
+            errors = rollback_cursor_agent_patch(
+                versions_dir=versions_dir,
+                files=[js, js],
+            )
+
+            self.assertEqual(errors, [])
+            self.assertEqual(js.read_text(encoding="utf-8"), "backup\n")
+            self.assertFalse(cache.exists())
+
+    def test_rollback_cursor_agent_patch_reports_missing_backup(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            versions_dir = Path(td) / "versions"
+            vdir = versions_dir / "test-version"
+            vdir.mkdir(parents=True, exist_ok=True)
+            js = vdir / "8658.index.js"
+            js.write_text("patched\n", encoding="utf-8")
+            cache = versions_dir / ".ccm-patch-cache.json"
+            cache.write_text("{}", encoding="utf-8")
+
+            errors = rollback_cursor_agent_patch(
+                versions_dir=versions_dir,
+                files=[js],
+            )
+
+            self.assertEqual(len(errors), 1)
+            self.assertIn("rollback backup missing", errors[0][1])
+            self.assertTrue(cache.exists())
 
     def test_patch_upgrades_v1_marker(self) -> None:
         # Simulate a previously patched file using the old marker.

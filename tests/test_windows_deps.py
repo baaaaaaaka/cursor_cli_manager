@@ -85,6 +85,11 @@ class TestWindowsDeps(unittest.TestCase):
             wd._prepend_to_path(Path(r"C:\tools"))
             self.assertEqual(os.environ["PATH"], before)
 
+    def test_path_separator_for_prepend_prefers_semicolon_for_windowsish_paths(self) -> None:
+        with patch("cursor_cli_manager.windows_deps.is_windows", return_value=False):
+            self.assertEqual(wd._path_separator_for_prepend(r"C:\A:C", Path(r"C:\Tools")), ";")
+            self.assertEqual(wd._path_separator_for_prepend("A;B", Path("/tmp/tools")), ";")
+
     def test_ripgrep_arch_suffix(self) -> None:
         with patch("cursor_cli_manager.windows_deps.platform.machine", return_value="AMD64"):
             self.assertEqual(wd._ripgrep_arch_suffix(), "x86_64-pc-windows-msvc")
@@ -117,6 +122,40 @@ class TestWindowsDeps(unittest.TestCase):
                 self.assertFalse(wd.ensure_windows_curses())
             run_pip.assert_called_once()
 
+    def test_ensure_windows_curses_returns_false_when_import_still_fails(self) -> None:
+        orig_import = builtins.__import__
+
+        def fake_import(name: str, *args: object, **kwargs: object) -> object:
+            if name == "curses":
+                raise ImportError("still missing")
+            return orig_import(name, *args, **kwargs)
+
+        with patch("cursor_cli_manager.windows_deps.sys.platform", "win32"), patch(
+            "cursor_cli_manager.windows_deps._run_pip_install", return_value=True
+        ):
+            with patch("builtins.__import__", side_effect=fake_import):
+                self.assertFalse(wd.ensure_windows_curses())
+
+    def test_run_pip_install_uses_user_outside_virtualenv(self) -> None:
+        with patch("cursor_cli_manager.windows_deps._in_virtualenv", return_value=False), patch(
+            "cursor_cli_manager.windows_deps.subprocess.run"
+        ) as run:
+            self.assertTrue(wd._run_pip_install(["windows-curses"]))
+
+        cmd = run.call_args[0][0]
+        self.assertIn("--user", cmd)
+        self.assertIn("windows-curses", cmd)
+
+    def test_run_pip_install_omits_user_in_virtualenv(self) -> None:
+        with patch("cursor_cli_manager.windows_deps._in_virtualenv", return_value=True), patch(
+            "cursor_cli_manager.windows_deps.subprocess.run"
+        ) as run:
+            self.assertTrue(wd._run_pip_install(["windows-curses"]))
+
+        cmd = run.call_args[0][0]
+        self.assertNotIn("--user", cmd)
+        self.assertIn("windows-curses", cmd)
+
     def test_fetch_ripgrep_asset_from_local_server(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
@@ -135,6 +174,20 @@ class TestWindowsDeps(unittest.TestCase):
                 with patch("cursor_cli_manager.windows_deps._RIPGREP_API_URL", f"{srv.base_url}/release.json"):
                     asset = wd._fetch_ripgrep_asset("x86_64-pc-windows-msvc")
                     self.assertEqual(asset, (asset_name, f"{srv.base_url}/{asset_name}"))
+
+    def test_fetch_ripgrep_asset_returns_none_for_malformed_assets(self) -> None:
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self) -> bytes:
+                return json.dumps({"assets": [{"name": 1}, "bad"]}).encode("utf-8")
+
+        with patch("cursor_cli_manager.windows_deps.urllib.request.urlopen", return_value=_Resp()):
+            self.assertIsNone(wd._fetch_ripgrep_asset("x86_64-pc-windows-msvc"))
 
     def test_download_and_extract_rg(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -182,3 +235,19 @@ class TestWindowsDeps(unittest.TestCase):
                     self.assertEqual(rg, install_dir / "rg.exe")
                     self.assertTrue((install_dir / "rg.exe").exists())
                     self.assertTrue(os.environ["PATH"].startswith(str(install_dir)))
+
+    def test_ensure_ripgrep_uses_existing_binary_in_install_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as td, patch(
+            "cursor_cli_manager.windows_deps.sys.platform", "win32"
+        ), patch("cursor_cli_manager.windows_deps.shutil.which", return_value=None), patch.dict(
+            os.environ, {"PATH": ""}, clear=False
+        ):
+            install_dir = Path(td) / "bin"
+            install_dir.mkdir(parents=True, exist_ok=True)
+            rg_path = install_dir / "rg.exe"
+            rg_path.write_bytes(b"rg")
+
+            rg = wd.ensure_ripgrep(bin_dir=install_dir)
+            self.assertTrue(os.environ["PATH"].startswith(str(install_dir)))
+
+        self.assertEqual(rg, rg_path)
