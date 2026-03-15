@@ -8,7 +8,7 @@ class TestCursorAgentCanaryWorkflow(unittest.TestCase):
         txt = (root / ".github" / "workflows" / "cursor_agent_installer_canary.yml").read_text(encoding="utf-8")
         self.assertIn('cron: "0 */4 * * *"', txt)
         self.assertIn("ubuntu-latest", txt)
-        self.assertIn("macos-15-intel", txt)
+        self.assertNotIn("macos-15-intel", txt)
         self.assertIn("macos-latest", txt)
         self.assertIn("windows-latest", txt)
         self.assertIn("scripts/run_cursor_agent_patch_canary.py", txt)
