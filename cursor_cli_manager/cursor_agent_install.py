@@ -580,6 +580,20 @@ def _path_is_within(path: Path, root: Path) -> bool:
     return False
 
 
+def _best_effort_rmtree(path: Path) -> None:
+    retry_delays = (0.1, 0.2, 0.5) if sys.platform.startswith("win") else ()
+    for delay_s in (0.0,) + retry_delays:
+        if delay_s > 0.0:
+            time.sleep(delay_s)
+        try:
+            shutil.rmtree(path)
+            return
+        except FileNotFoundError:
+            return
+        except Exception:
+            continue
+
+
 def _target_version_dir_for_cursor_agent(*, versions_dir: Path, cursor_agent_path: str) -> Optional[Path]:
     agent_path = Path(cursor_agent_path).expanduser()
     candidates = [agent_path]
@@ -627,7 +641,10 @@ def _verify_patched_cursor_agent_launch(
     from cursor_cli_manager.opening import run_cursor_agent_launch_smoke
 
     _verify_cursor_agent_command(cursor_agent_path, timeout_s=5.0)
-    smoke_root = Path(tempfile.mkdtemp(prefix=".ccm-launch-smoke-", dir=str(versions_dir.parent)))
+    # Keep the smoke workspace outside the install root. On Windows, child
+    # shells can briefly retain their working directory after shutdown, and
+    # leaving the smoke tree under install_root can make outer temp cleanup fail.
+    smoke_root = Path(tempfile.mkdtemp(prefix=".ccm-launch-smoke-"))
     try:
         workspace = smoke_root / "workspace"
         config_dir = smoke_root / "cursor-config"
@@ -640,10 +657,7 @@ def _verify_patched_cursor_agent_launch(
             cursor_agent_config_dir=config_dir,
         )
     finally:
-        try:
-            shutil.rmtree(smoke_root)
-        except Exception:
-            pass
+        _best_effort_rmtree(smoke_root)
     if smoke.ok and smoke.launch_sustained:
         return
     detail = (smoke.output or "").strip()
