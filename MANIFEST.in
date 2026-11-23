@@ -1,0 +1,2 @@
+recursive-include proxy *.go go.mod go.sum
+include scripts/build_proxy.py

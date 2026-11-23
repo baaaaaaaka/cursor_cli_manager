@@ -734,6 +734,7 @@ def apply_verified_cursor_agent_patch(
     agent_dirs: Optional[CursorAgentDirs] = None,
     force: bool = False,
     require_changes: bool = False,
+    require_model_changes: bool = False,
 ) -> object:
     snapshots = _snapshot_patch_inputs(versions_dir)
     rep = patch_cursor_agent_models(versions_dir=versions_dir, dry_run=False, force=force)
@@ -750,6 +751,9 @@ def apply_verified_cursor_agent_patch(
         raise RuntimeError(f"cursor-agent patch failed ({_summarize_patch_report(rep)}){rollback_note}")
     if require_changes and not changed:
         raise RuntimeError(f"cursor-agent patch made no changes ({_summarize_patch_report(rep)})")
+    if require_model_changes and not rep.model_patched_files:
+        rollback_note = _rollback_patched_cursor_agent(versions_dir=versions_dir, rep=rep, snapshots=snapshots)
+        raise RuntimeError(f"cursor-agent model patch made no changes ({_summarize_patch_report(rep)}){rollback_note}")
     if not changed:
         return rep
     try:

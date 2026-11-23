@@ -70,6 +70,7 @@ class TestCursorAgentCanary(unittest.TestCase):
                 install_from_spec=fake_install_from_spec,
                 apply_patch=lambda **_kwargs: SimpleNamespace(
                     patched_files=["a", "b", "c"],
+                    model_patched_files=["a", "b"],
                     repaired_files=[],
                     skipped_already_patched=0,
                     skipped_not_applicable=44,

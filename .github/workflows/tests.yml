@@ -5,6 +5,48 @@ on:
   pull_request:
 
 jobs:
+  proxy:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15-intel, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: proxy/go.mod
+          cache-dependency-path: proxy/go.sum
+      - run: go -C proxy test -race ./...
+      - run: go -C proxy vet ./...
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python scripts/build_proxy.py
+      - run: python -m cursor_cli_manager proxy list
+        env:
+          CCM_PROXY_STATE_DIR: ${{ runner.temp }}/ccm-proxy-ci-state
+      - name: Run OpenSSH forwarding and recovery fixture
+        if: runner.os == 'Linux'
+        env:
+          CCM_PROXY_SSH_INTEGRATION: "1"
+          CCM_PROXY_TEST_SSHD_SUDO: "1"
+          CCM_PROXY_TEST_CCM: ${{ runner.temp }}/ccm-proxy-package/dist/ccm/ccm
+          PYINSTALLER_CONFIG_DIR: ${{ runner.temp }}/ccm-proxy-package/cache
+        run: |
+          if [ ! -x /usr/sbin/sshd ]; then
+            sudo apt-get update
+            sudo apt-get install -y openssh-server
+          fi
+          sudo install -d -m 755 /run/sshd
+          python -m pip install pyinstaller certifi
+          package="$RUNNER_TEMP/ccm-proxy-package"
+          python -m PyInstaller -n ccm --hidden-import _curses --collect-data certifi \
+            --specpath "$package/spec" --workpath "$package/build" --distpath "$package/dist" \
+            cursor_cli_manager/__main__.py
+          install -m 0755 cursor_cli_manager/bin/ccm-proxy "$package/dist/ccm/ccm-proxy"
+          python -m unittest tests.test_proxy_ssh_integration -v
+
   unittest:
     strategy:
       fail-fast: false

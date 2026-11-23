@@ -21,6 +21,8 @@ import shutil
 import ssl
 import time
 
+from cursor_cli_manager.proxy import proxy_urlopen
+
 
 ENV_CCM_GITHUB_REPO = "CCM_GITHUB_REPO"  # e.g. "baaaaaaaka/cursor_cli_manager"
 DEFAULT_GITHUB_REPO = "baaaaaaaka/cursor_cli_manager"
@@ -92,7 +94,7 @@ def _bundled_cafile() -> Optional[str]:
 def _default_fetch(url: str, timeout_s: float, headers: Dict[str, str]) -> bytes:
     req = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        with proxy_urlopen(req, timeout=timeout_s) as resp:
             return resp.read()
     except Exception as e:
         cafile = _bundled_cafile()
@@ -101,7 +103,7 @@ def _default_fetch(url: str, timeout_s: float, headers: Dict[str, str]) -> bytes
         if not _looks_like_cert_verify_error(e):
             raise
         ctx = ssl.create_default_context(cafile=cafile)
-        with urllib.request.urlopen(req, timeout=timeout_s, context=ctx) as resp:
+        with proxy_urlopen(req, timeout=timeout_s, context=ctx) as resp:
             return resp.read()
 
 

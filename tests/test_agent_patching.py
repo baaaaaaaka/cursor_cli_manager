@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 import unittest
@@ -236,8 +237,21 @@ class TestAgentPatching(unittest.TestCase):
             self.assertTrue(rep2.ok)
             self.assertEqual(rep2.scanned_files, 0)
             self.assertEqual(len(rep2.patched_files), 0)
+            self.assertEqual(rep2.model_already_patched_files, [js])
             self.assertEqual(rep2.skipped_already_patched, 1)
             self.assertEqual(rep2.skipped_cached, 1)
+
+            cache = versions_dir / ".ccm-patch-cache.json"
+            old_cache = json.loads(cache.read_text(encoding="utf-8"))
+            old_cache["version"] = 1
+            for entry in old_cache["files"].values():
+                del entry["model_patched"]
+            cache.write_text(json.dumps(old_cache), encoding="utf-8")
+
+            rescanned = patch_cursor_agent_models(versions_dir=versions_dir)
+            self.assertEqual(rescanned.scanned_files, 1)
+            self.assertEqual(rescanned.model_already_patched_files, [js])
+            self.assertEqual(rescanned.model_patched_files, [])
 
     def test_rollback_cursor_agent_patch_restores_once_and_clears_cache(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -346,8 +360,29 @@ class TestAgentPatching(unittest.TestCase):
             self.assertTrue(rep2.ok)
             self.assertEqual(rep2.scanned_files, 0)
             self.assertEqual(len(rep2.patched_files), 0)
+            self.assertEqual(rep2.model_already_patched_files, [])
             self.assertEqual(rep2.skipped_already_patched, 1)
             self.assertEqual(rep2.skipped_cached, 1)
+
+    def test_patch_minified_models_preserves_custom_request(self) -> None:
+        code = (
+            'async function b(e,t){const{models:r}=await e.getUsableModels(new s.KD({customModelIds:t??[]}));'
+            'return r.length>0?r:void 0}async function c(e){return e.getDefaultModelForCli()}'
+        )
+        with tempfile.TemporaryDirectory() as td:
+            versions_dir = Path(td)
+            vdir = versions_dir / "test-version"
+            vdir.mkdir()
+            js = vdir / "1234.index.js"
+            js.write_text(code, encoding="utf-8")
+
+            report = patch_cursor_agent_models(versions_dir=versions_dir)
+            self.assertTrue(report.ok)
+            self.assertEqual(report.model_patched_files, [js])
+            patched = js.read_text(encoding="utf-8")
+            self.assertIn("e.availableModels({})", patched)
+            self.assertIn("e.getUsableModels(new s.KD({customModelIds:t??[]}))", patched)
+            self.assertEqual(patch_cursor_agent_models(versions_dir=versions_dir, force=True).patched_files, [])
 
     def test_patch_force_rescans_cache(self) -> None:
         with tempfile.TemporaryDirectory() as td:

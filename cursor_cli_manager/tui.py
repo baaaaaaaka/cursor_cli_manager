@@ -27,6 +27,7 @@ from cursor_cli_manager.formatting import (
 )
 from cursor_cli_manager.models import AgentChat, AgentWorkspace
 from cursor_cli_manager.update import UpdateStatus, check_for_update
+from cursor_cli_manager.proxy import selected_profile
 from cursor_cli_manager import __version__
 from cursor_cli_manager.exporting import build_export_filename, choose_nonconflicting_path, tab_complete_path, write_text_file
 
@@ -1685,8 +1686,13 @@ def select_chat(
     update_checked_at = 0.0
     update_checking = False
 
+    managed_proxy = selected_profile() is not None
+
     def _start_update_check(*, force: bool = False) -> None:
         nonlocal update_checking, update_checked_at
+        if managed_proxy:
+            # An explicit upgrade can start the proxy. Browsing history needs neither.
+            return
         now = time.monotonic()
         # Check at most every 5 minutes (or on explicit force).
         if (not force) and update_checked_at and (now - update_checked_at) < 300:
@@ -2029,7 +2035,9 @@ def select_chat(
         # - Update available: bold keybinding hint
         update_right = f"v{__version__}"
         update_right_attr = 0
-        if update_status is None:
+        if managed_proxy:
+            update_right += "  Ctrl+U upgrade"
+        elif update_status is None:
             if update_checking:
                 update_right = f"v{__version__} checking"
         elif update_status.supported:
@@ -2253,7 +2261,7 @@ def select_chat(
 
         # Ctrl+U: upgrade (when we can safely fast-forward)
         if ch == 21:  # ^U
-            if update_status and update_status.supported and update_status.update_available:
+            if managed_proxy or (update_status and update_status.supported and update_status.update_available):
                 raise UpdateRequested()
             continue
 

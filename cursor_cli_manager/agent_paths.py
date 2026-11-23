@@ -8,6 +8,7 @@ from typing import Iterable, Optional
 
 
 ENV_CURSOR_AGENT_CONFIG_DIR = "CURSOR_AGENT_CONFIG_DIR"
+ENV_CURSOR_CONFIG_DIR = "CURSOR_CONFIG_DIR"
 
 
 @dataclass(frozen=True)
@@ -20,10 +21,13 @@ class CursorAgentDirs:
 
 
 def get_cursor_agent_dirs() -> CursorAgentDirs:
-    override = os.environ.get(ENV_CURSOR_AGENT_CONFIG_DIR)
-    if override:
-        return CursorAgentDirs(Path(override).expanduser())
-    # cursor-agent uses Cursor config dir (defaults to ~/.cursor)
+    for name in (ENV_CURSOR_AGENT_CONFIG_DIR, ENV_CURSOR_CONFIG_DIR):
+        override = os.environ.get(name)
+        if override and override.strip():
+            return CursorAgentDirs(Path(override).expanduser().absolute())
+    xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config and xdg_config.strip():
+        return CursorAgentDirs(Path(xdg_config).expanduser().absolute() / "cursor")
     return CursorAgentDirs(Path.home() / ".cursor")
 
 

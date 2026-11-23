@@ -29,6 +29,16 @@ class TestAgentPaths(unittest.TestCase):
                 self.assertEqual(dirs.config_dir, Path(td))
                 self.assertEqual(dirs.chats_dir, Path(td) / "chats")
 
+    def test_cursor_config_directory_precedence(self) -> None:
+        with tempfile.TemporaryDirectory() as td, patch.dict(os.environ, {}, clear=True):
+            base = Path(td)
+            os.environ["XDG_CONFIG_HOME"] = str(base / "xdg")
+            self.assertEqual(get_cursor_agent_dirs().config_dir, base / "xdg" / "cursor")
+            os.environ["CURSOR_CONFIG_DIR"] = str(base / "native")
+            self.assertEqual(get_cursor_agent_dirs().config_dir, base / "native")
+            os.environ[ENV_CURSOR_AGENT_CONFIG_DIR] = str(base / "ccm")
+            self.assertEqual(get_cursor_agent_dirs().config_dir, base / "ccm")
+
     def test_workspace_hash_candidates_includes_resolved_variant_for_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

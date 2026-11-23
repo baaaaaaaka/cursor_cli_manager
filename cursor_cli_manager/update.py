@@ -9,10 +9,12 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
+from urllib.parse import urlsplit
 
 import shutil
 
 from cursor_cli_manager import __version__
+from cursor_cli_manager.proxy import ProxyError, preserve_helper_for_vcs_update, proxy_environment, selected_profile
 from cursor_cli_manager.github_release import (
     ENV_CCM_INSTALL_DEST,
     ENV_CCM_INSTALL_ROOT,
@@ -63,6 +65,9 @@ def _default_runner(cmd: Sequence[str], timeout_s: float) -> Tuple[int, str, str
     env.setdefault("PIP_DISABLE_PIP_VERSION_CHECK", "1")
     p: Optional[subprocess.Popen] = None
     try:
+        executable = os.path.basename(cmd[0]).lower()
+        if executable in ("git", "git.exe") or list(cmd[1:3]) == ["-m", "pip"]:
+            env = proxy_environment(env, package_manager=True) or env
         # Important:
         # - start_new_session=True prevents the child (git/ssh/pip) from inheriting the controlling TTY.
         # - stdin=DEVNULL avoids accidental reads from stdin.
@@ -191,6 +196,12 @@ def _git_ls_remote(url: str, rev: str, *, timeout_s: float, run: Runner) -> Tupl
     return _git(["ls-remote", url, rev], timeout_s=timeout_s, run=run)
 
 
+def _managed_vcs_url(url: str) -> bool:
+    if url.startswith("git+"):
+        url = url[4:]
+    return urlsplit(url).scheme in ("http", "https")
+
+
 def build_vcs_requirement(info: Pep610InstallInfo) -> str:
     """
     Build a pip-compatible VCS requirement string from PEP 610 info.
@@ -275,6 +286,8 @@ def check_for_update(
     info = read_pep610_install_info(package_dir=package_dir)
     if info is None:
         return UpdateStatus(supported=False, error="not a PEP 610 VCS install")
+    if selected_profile() is not None and not _managed_vcs_url(info.url):
+        return UpdateStatus(supported=False, error="a managed proxy requires an HTTP or HTTPS Git remote")
 
     # Determine which remote ref to compare against.
     rev = info.requested_revision or "HEAD"
@@ -400,6 +413,13 @@ def perform_update(
     info = read_pep610_install_info(package_dir=package_dir)
     if info is None:
         return False, "not a PEP 610 VCS install"
+    if selected_profile() is not None and not _managed_vcs_url(info.url):
+        return False, "a managed proxy requires an HTTP or HTTPS Git remote"
+
+    try:
+        preserve_helper_for_vcs_update()
+    except ProxyError as exc:
+        return False, str(exc)
 
     req = build_vcs_requirement(info)
     cmd = [python, "-m", "pip", "install", "--upgrade", "--no-deps", "--force-reinstall", req]

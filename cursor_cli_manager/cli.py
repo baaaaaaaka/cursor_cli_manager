@@ -3,22 +3,22 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-if sys.platform.startswith("win"):
-    from cursor_cli_manager.windows_deps import ensure_windows_deps
-
-    ensure_windows_deps()
-
-import curses
+try:
+    import curses
+except ImportError:
+    curses = None
 
 from cursor_cli_manager import __version__
 from cursor_cli_manager.agent_discovery import discover_agent_chats, discover_agent_workspaces
 from cursor_cli_manager.agent_paths import (
     ENV_CURSOR_AGENT_CONFIG_DIR,
+    ENV_CURSOR_CONFIG_DIR,
     CursorAgentDirs,
     get_cursor_agent_dirs,
     workspace_hash_candidates,
@@ -59,17 +59,32 @@ from cursor_cli_manager.agent_workspace_map import (
     workspace_map_path,
 )
 from cursor_cli_manager.exporting import write_text_file
-from cursor_cli_manager.tui import (
-    ExportPendingExit,
-    UpdateRequested,
-    disable_xon_xoff_flow_control,
-    force_exit_alternate_screen,
-    probe_synchronized_output_support,
-    restore_termios,
-    select_chat,
+from cursor_cli_manager.proxy import (
+    ProxyError, command as proxy_command, selected_profile, selected_profile_id, selected_proxy,
 )
+from cursor_cli_manager.proxy_setup import resolve_selection
 from cursor_cli_manager.update import perform_update
 from cursor_cli_manager.update import preferred_linux_asset_switch
+from cursor_cli_manager.windows_deps import ensure_ripgrep, ensure_windows_curses
+
+
+def _load_tui() -> None:
+    global curses, ExportPendingExit, UpdateRequested, disable_xon_xoff_flow_control
+    global force_exit_alternate_screen, probe_synchronized_output_support, restore_termios, select_chat
+    import curses
+    from cursor_cli_manager.tui import (
+        ExportPendingExit,
+        UpdateRequested,
+        disable_xon_xoff_flow_control,
+        force_exit_alternate_screen,
+        probe_synchronized_output_support,
+        restore_termios,
+        select_chat,
+    )
+
+
+if curses is not None:
+    _load_tui()
 
 
 def _workspace_to_json(ws: AgentWorkspace) -> Dict[str, Any]:
@@ -136,7 +151,12 @@ def cmd_doctor(agent_dirs: CursorAgentDirs) -> int:
             rep = patch_cursor_agent_models(versions_dir=vdir, dry_run=True)
             repair_note = f" would_repair={len(rep.repaired_files)}" if rep.repaired_files else ""
             print(
-                f"- model patch dry-run: would_patch={len(rep.patched_files)}{repair_note} already_patched={rep.skipped_already_patched} "
+                f"- model patch dry-run: would_patch={len(rep.model_patched_files)} "
+                f"already_patched={len(rep.model_already_patched_files)}"
+            )
+            print(
+                f"- bundle patch dry-run: would_patch={len(rep.patched_files)}{repair_note} "
+                f"already_patched={rep.skipped_already_patched} "
                 f"not_applicable={rep.skipped_not_applicable} errors={len(rep.errors)}"
             )
         else:
@@ -210,6 +230,23 @@ def _patch_verification_executable_for_versions_dir(versions_dir: Path) -> Optio
     return None
 
 
+def _format_open_command(cmd: List[str], workspace_path: Path, config_dir: Path) -> str:
+    if sys.platform.startswith("win"):
+        def quote(value: str) -> str:
+            return "'" + value.replace("'", "''") + "'"
+
+        command = " ".join(quote(arg) for arg in cmd)
+        return (
+            f"& {{ Push-Location -LiteralPath {quote(str(workspace_path))} -ErrorAction Stop; "
+            f"$previousConfig = $env:{ENV_CURSOR_CONFIG_DIR}; "
+            f"try {{ $env:{ENV_CURSOR_CONFIG_DIR} = {quote(str(config_dir))}; & {command} }} "
+            f"finally {{ $env:{ENV_CURSOR_CONFIG_DIR} = $previousConfig; Pop-Location }} }}"
+        )
+
+    command = " ".join(shlex.quote(arg) for arg in cmd)
+    return f"(cd {shlex.quote(str(workspace_path))} && {ENV_CURSOR_CONFIG_DIR}={shlex.quote(str(config_dir))} {command})"
+
+
 def cmd_open(
     agent_dirs: CursorAgentDirs,
     chat_id: str,
@@ -223,13 +260,36 @@ def cmd_open(
     if workspace_path is None:
         print("Error: --workspace is required (cursor-agent chats are grouped by cwd).")
         return 2
+    workspace_path = workspace_path.absolute()
+    profile = selected_profile()
+    if dry_run and profile is not None:
+        cmd = ["ccm"]
+        if selected_profile_id() is None:
+            cmd.extend(["--proxy-profile", profile])
+        cmd.extend(["--config-dir", str(agent_dirs.config_dir.absolute())])
+        cmd.append("--patch-models" if patch_models else "--no-patch-models")
+        if cursor_agent_versions_dir:
+            cmd.extend(["--cursor-agent-versions-dir", str(Path(cursor_agent_versions_dir).expanduser().absolute())])
+        if force_patch_models:
+            cmd.append("--force-patch-models")
+        cmd.extend(["open", chat_id, "--workspace", str(workspace_path)])
+        if sys.platform.startswith("win"):
+            print("& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in cmd))
+        else:
+            print(" ".join(shlex.quote(arg) for arg in cmd))
+        return 0
     # Learning from explicit workspace path improves mapping without requiring user to cd first.
     learn_workspace_path(agent_dirs, workspace_path)
-    if not dry_run:
-        agent = _ensure_cursor_agent_for_command(allow_install=True)
-        if not agent:
-            return 1
-    if patch_models and not dry_run:
+    if dry_run:
+        cmd = build_resume_command(chat_id, workspace_path=workspace_path, agent_dirs=agent_dirs)
+        print(_format_open_command(cmd, workspace_path, agent_dirs.config_dir.absolute()))
+        return 0
+    if sys.platform.startswith("win"):
+        ensure_ripgrep()
+    agent = _ensure_cursor_agent_for_command(allow_install=True)
+    if not agent:
+        return 1
+    if patch_models:
         vdir = resolve_cursor_agent_versions_dir(
             explicit=cursor_agent_versions_dir,
             cursor_agent_path=agent,
@@ -242,11 +302,6 @@ def cmd_open(
                 force_patch_models=force_patch_models,
             ):
                 return 1
-    cmd = build_resume_command(chat_id, workspace_path=workspace_path, agent_dirs=agent_dirs)
-    if dry_run:
-        # Display as a shell-friendly snippet.
-        print(f"cd {workspace_path} && " + " ".join(cmd))
-        return 0
     exec_resume_chat(chat_id, workspace_path=workspace_path, agent_dirs=agent_dirs)
     return 0  # unreachable
 
@@ -438,7 +493,17 @@ def cmd_tui(
     cursor_agent_versions_dir: Optional[str] = None,
     force_patch_models: bool = False,
 ) -> int:
-    preferred_asset = preferred_linux_asset_switch()
+    if curses is None:
+        if not ensure_windows_curses():
+            print("Error: could not initialize curses.", file=sys.stderr)
+            return 1
+        try:
+            _load_tui()
+        except ImportError as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+    managed = selected_profile() is not None
+    preferred_asset = None if managed else preferred_linux_asset_switch()
     if preferred_asset:
         ok, out = perform_update(python=sys.executable, asset_name=preferred_asset)
         if out:
@@ -447,26 +512,32 @@ def cmd_tui(
             return _restart_self(sys.argv[:] or ["ccm"])
         print(f"Auto-upgrade to {preferred_asset} failed; continuing.", file=sys.stderr)
 
-    agent = _ensure_cursor_agent_for_command(allow_install=True)
-    if not agent:
-        return 1
-
-    # Non-blocking: probe cursor-agent optional flags in background while the user browses the TUI.
-    if has_legacy_install(agent_dirs):
-        start_cursor_agent_flag_probe()
-    if patch_models:
+    def prepare_agent(*, probe_flags: bool) -> bool:
+        if sys.platform.startswith("win"):
+            ensure_ripgrep()
+        agent = _ensure_cursor_agent_for_command(allow_install=True)
+        if not agent:
+            return False
+        if probe_flags and has_legacy_install(agent_dirs):
+            start_cursor_agent_flag_probe()
+        if not patch_models:
+            return True
         vdir = resolve_cursor_agent_versions_dir(
             explicit=cursor_agent_versions_dir,
             cursor_agent_path=agent,
         )
-        if vdir is not None:
-            if not _apply_patch_for_command(
-                versions_dir=vdir,
-                cursor_agent_path=agent,
-                agent_dirs=agent_dirs,
-                force_patch_models=force_patch_models,
-            ):
-                return 1
+        return vdir is None or _apply_patch_for_command(
+            versions_dir=vdir,
+            cursor_agent_path=agent,
+            agent_dirs=agent_dirs,
+            force_patch_models=force_patch_models,
+        )
+
+    if managed:
+        if has_legacy_install(agent_dirs) and resolve_cursor_agent_path():
+            start_cursor_agent_flag_probe()
+    elif not prepare_agent(probe_flags=True):
+        return 1
 
     # Hide chats whose original workspace folder no longer exists.
     workspaces = _pin_cwd_workspace(
@@ -525,6 +596,8 @@ def cmd_tui(
         print("Error: selected workspace has unknown path; cannot safely resume.")
         print("Tip: run the manager from that folder so the workspace can be identified.")
         return 1
+    if managed and not prepare_agent(probe_flags=False):
+        return 1
     if chat is None:
         exec_new_chat(workspace_path=ws.workspace_path, agent_dirs=agent_dirs)
         return 0  # unreachable
@@ -534,6 +607,7 @@ def cmd_tui(
 
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="ccm", description="Cursor Agent Chat Manager (terminal-only)")
+    parser.add_argument("--proxy-profile", metavar="NAME", help="Route network actions through a CCM SSH proxy profile.")
     parser.add_argument(
         "--config-dir",
         dest="config_dir",
@@ -582,7 +656,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     p_open = sub.add_parser("open", help="Resume a cursor-agent chat session by chatId.")
     p_open.add_argument("chat_id")
     p_open.add_argument("--workspace", dest="workspace", default=None, help="Workspace folder path (required).")
-    p_open.add_argument("--dry-run", action="store_true", help="Print command instead of executing.")
+    p_open.add_argument("--dry-run", action="store_true", help="Print command instead of executing (PowerShell on Windows).")
 
     p_patch = sub.add_parser("patch-models", help="Patch cursor-agent bundles to prefer AvailableModels.")
     p_patch.add_argument("--dry-run", action="store_true", help="Scan and report without writing.")
@@ -595,11 +669,34 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
 
     sub.add_parser("upgrade", help="Upgrade ccm (VCS pip install or GitHub-release binary).")
+    p_proxy = sub.add_parser("proxy", help="Manage SSH proxy profiles and gateways.", add_help=False)
+    p_proxy.add_argument("proxy_args", nargs=argparse.REMAINDER)
 
-    args = parser.parse_args(argv)
+    # argparse treats a leading --help as an option even inside REMAINDER.
+    args, extra = parser.parse_known_args(argv)
+    if extra and not (args.command == "proxy" and extra in (["--help"], ["-h"]) and not args.proxy_args):
+        parser.error("unrecognized arguments: " + " ".join(extra))
+    try:
+        if args.command == "proxy":
+            return proxy_command(args.proxy_args or extra)
+        cmd = args.command or "tui"
+        selection = (args.proxy_profile, None)
+        if cmd == "tui" or (cmd == "open" and args.workspace):
+            selection = resolve_selection(args.proxy_profile, prompt=not getattr(args, "dry_run", False))
+        elif cmd == "upgrade" or (cmd == "patch-models" and not args.dry_run):
+            selection = resolve_selection(args.proxy_profile, prompt=False)
+        with selected_proxy(*selection):
+            return _dispatch(args, parser)
+    except KeyboardInterrupt:
+        return 130
+    except ProxyError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
 
+
+def _dispatch(args: argparse.Namespace, parser: argparse.ArgumentParser) -> int:
     if args.config_dir:
-        agent_dirs = CursorAgentDirs(Path(args.config_dir).expanduser())
+        agent_dirs = CursorAgentDirs(Path(args.config_dir).expanduser().absolute())
     else:
         agent_dirs = get_cursor_agent_dirs()
 
@@ -639,6 +736,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
     if cmd == "patch-models":
         if not has_legacy_install(agent_dirs):
+            print("Model patch disabled (no legacy history).")
             return 0
         vdir = resolve_cursor_agent_versions_dir(
             explicit=getattr(args, "cursor_agent_versions_dir", None),
@@ -647,7 +745,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         if vdir is None:
             print("cursor-agent versions dir not found. Set --cursor-agent-versions-dir or $CCM_CURSOR_AGENT_VERSIONS_DIR.")
             return 2
-        if bool(getattr(args, "dry_run", False)):
+        dry_run = bool(args.dry_run)
+        if dry_run:
             rep = patch_cursor_agent_models(
                 versions_dir=vdir,
                 dry_run=True,
@@ -676,6 +775,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"already_patched: {rep.skipped_already_patched}")
         print(f"not_applicable: {rep.skipped_not_applicable}")
         print(f"cached_skips: {rep.skipped_cached}")
+        model_action = "model_would_patch" if dry_run else "model_patched_files"
+        print(f"{model_action}: {len(rep.model_patched_files)}")
+        for path in rep.model_patched_files:
+            print(f"- {path}")
+        print(f"model_already_patched: {len(rep.model_already_patched_files)}")
+        for path in rep.model_already_patched_files:
+            print(f"- {path}")
+        if rep.ok and not (rep.model_patched_files or rep.model_already_patched_files):
+            print("No compatible model code found in the scanned bundles.")
         if rep.errors:
             print(f"errors: {len(rep.errors)}")
             for p, e in rep.errors[:10]:

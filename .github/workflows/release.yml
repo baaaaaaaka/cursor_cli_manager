@@ -17,6 +17,10 @@ jobs:
       IMAGE_REPO: ${{ github.repository == 'baaaaaaaka/cursor_cli_manager' && format('ghcr.io/{0}/ccm-linux-builder', github.repository_owner) || format('ghcr.io/{0}/{1}/ccm-linux-builder', github.repository_owner, github.event.repository.name) }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: proxy/go.mod
+          cache-dependency-path: proxy/go.sum
 
       - name: Log in to GHCR (pull builder image)
         uses: docker/login-action@v3
@@ -44,6 +48,10 @@ jobs:
       IMAGE_REPO: ${{ github.repository == 'baaaaaaaka/cursor_cli_manager' && format('ghcr.io/{0}/ccm-linux-builder', github.repository_owner) || format('ghcr.io/{0}/{1}/ccm-linux-builder', github.repository_owner, github.event.repository.name) }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: proxy/go.mod
+          cache-dependency-path: proxy/go.sum
 
       - name: Log in to GHCR (pull builder image)
         uses: docker/login-action@v3
@@ -71,6 +79,10 @@ jobs:
       IMAGE_REPO: ${{ github.repository == 'baaaaaaaka/cursor_cli_manager' && format('ghcr.io/{0}/ccm-linux-builder', github.repository_owner) || format('ghcr.io/{0}/{1}/ccm-linux-builder', github.repository_owner, github.event.repository.name) }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: proxy/go.mod
+          cache-dependency-path: proxy/go.sum
 
       - name: Log in to GHCR (pull builder image)
         uses: docker/login-action@v3
@@ -96,6 +108,10 @@ jobs:
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: proxy/go.mod
+          cache-dependency-path: proxy/go.sum
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -105,6 +121,7 @@ jobs:
           set -euxo pipefail
           python -m pip install -U pip "setuptools<69" wheel pyinstaller certifi
           python -m PyInstaller --clean -n ccm --collect-data certifi --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
+          python scripts/build_proxy.py --output-dir out/_dist/ccm
           tar -C out/_dist -czf out/ccm-macos-x86_64.tar.gz ccm
 
       - uses: actions/upload-artifact@v4
@@ -116,6 +133,10 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: proxy/go.mod
+          cache-dependency-path: proxy/go.sum
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -125,6 +146,7 @@ jobs:
           set -euxo pipefail
           python -m pip install -U pip "setuptools<69" wheel pyinstaller certifi
           python -m PyInstaller --clean -n ccm --collect-data certifi --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
+          python scripts/build_proxy.py --output-dir out/_dist/ccm
           tar -C out/_dist -czf out/ccm-macos-arm64.tar.gz ccm
 
       - uses: actions/upload-artifact@v4
@@ -136,6 +158,10 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: proxy/go.mod
+          cache-dependency-path: proxy/go.sum
 
       - uses: actions/setup-python@v5
         with:
@@ -153,6 +179,8 @@ jobs:
         run: |
           $env:PYTHONUTF8 = "1"
           python -m PyInstaller --clean -n ccm --hidden-import _curses --collect-data certifi --specpath out/_spec --distpath out/_dist --workpath out/_build cursor_cli_manager/__main__.py
+          python scripts/build_proxy.py --output-dir out/_dist/ccm
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           Compress-Archive -Path out/_dist/ccm -DestinationPath out/ccm-windows-x86_64.zip -Force
 
       - uses: actions/upload-artifact@v4
@@ -246,12 +274,15 @@ jobs:
           fi
 
       - name: Smoke test linux bundle
+        env:
+          CCM_PROXY_STATE_DIR: ${{ runner.temp }}/ccm-test/proxy
         run: |
           set -euxo pipefail
           CFG="${RUNNER_TEMP}/ccm-test/config"
           "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" doctor
           "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" list --pretty
           "${RUNNER_TEMP}/ccm-test/bin/cursor-cli-manager" --config-dir "${CFG}" list
+          "${RUNNER_TEMP}/ccm-test/bin/ccm" proxy list
 
       - name: Smoke test linux auto-install without external Python
         env:
@@ -322,12 +353,15 @@ jobs:
           fi
 
       - name: Smoke test macOS x86_64 bundle
+        env:
+          CCM_PROXY_STATE_DIR: ${{ runner.temp }}/ccm-test/proxy
         run: |
           set -euxo pipefail
           CFG="${RUNNER_TEMP}/ccm-test/config"
           "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" doctor
           "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" list --pretty
           "${RUNNER_TEMP}/ccm-test/bin/cursor-cli-manager" --config-dir "${CFG}" list
+          "${RUNNER_TEMP}/ccm-test/bin/ccm" proxy list
 
       - name: Smoke test macOS x86_64 auto-install without external Python
         env:
@@ -398,12 +432,15 @@ jobs:
           fi
 
       - name: Smoke test macOS arm64 bundle
+        env:
+          CCM_PROXY_STATE_DIR: ${{ runner.temp }}/ccm-test/proxy
         run: |
           set -euxo pipefail
           CFG="${RUNNER_TEMP}/ccm-test/config"
           "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" doctor
           "${RUNNER_TEMP}/ccm-test/bin/ccm" --config-dir "${CFG}" list --pretty
           "${RUNNER_TEMP}/ccm-test/bin/cursor-cli-manager" --config-dir "${CFG}" list
+          "${RUNNER_TEMP}/ccm-test/bin/ccm" proxy list
 
       - name: Smoke test macOS arm64 auto-install without external Python
         env:
@@ -437,11 +474,14 @@ jobs:
 
       - name: Smoke test Windows bundle
         shell: pwsh
+        env:
+          CCM_PROXY_STATE_DIR: ${{ runner.temp }}\ccm-test\proxy
         run: |
           $cfg = Join-Path $env:RUNNER_TEMP "ccm-test\config"
           New-Item -ItemType Directory -Path $cfg -Force | Out-Null
           & "$env:RUNNER_TEMP\ccm-test\ccm\ccm.exe" --config-dir $cfg doctor
           & "$env:RUNNER_TEMP\ccm-test\ccm\ccm.exe" --config-dir $cfg list --pretty
+          & "$env:RUNNER_TEMP\ccm-test\ccm\ccm.exe" proxy list
 
       - name: Smoke test Windows auto-install without external Python
         shell: pwsh
@@ -450,6 +490,39 @@ jobs:
         run: |
           $env:PYTHONUTF8 = "1"
           python scripts/test_auto_install_bundle.py --os windows --arch x64 --ccm-bin "$env:CCM_BIN"
+
+  build-wheel:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-15-intel, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: proxy/go.mod
+          cache-dependency-path: proxy/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: |
+          set -euo pipefail
+          python scripts/build_proxy.py
+          python -m pip wheel --no-deps -w wheelhouse .
+          python -m pip install wheelhouse/*.whl
+          cd "$RUNNER_TEMP"
+          export CCM_PROXY_STATE_DIR="$RUNNER_TEMP/ccm-wheel-proxy"
+          python -m cursor_cli_manager proxy list
+          python -m cursor_cli_manager proxy profile add smoke --host localhost
+          python -m cursor_cli_manager proxy profile remove smoke
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.os }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
 
   publish:
     runs-on: ubuntu-latest
@@ -464,6 +537,7 @@ jobs:
       - smoke-macos-x86_64
       - smoke-macos-arm64
       - smoke-windows
+      - build-wheel
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download artifacts
@@ -475,7 +549,7 @@ jobs:
       - name: Prepare checksums.txt
         run: |
           set -euxo pipefail
-          (cd dist && sha256sum ccm-* > checksums.txt)
+          (cd dist && sha256sum ccm-* *.whl > checksums.txt)
           ls -la dist
 
       - name: Publish GitHub Release
@@ -483,6 +557,7 @@ jobs:
         with:
           files: |
             dist/ccm-*
+            dist/*.whl
             dist/checksums.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

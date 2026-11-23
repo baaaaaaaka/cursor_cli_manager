@@ -135,17 +135,89 @@ Note: global flags must come before the subcommand:
 ccm --config-dir <dir> doctor
 ```
 
+## SSH proxy
+
+CCM can run a loopback HTTP proxy backed by an OpenSSH dynamic tunnel. Use a
+release bundle or a platform wheel that contains the `ccm-proxy` helper. On a
+source checkout, run `python scripts/build_proxy.py` before `pip install -e .`.
+Building the helper requires Go 1.24 or newer. Running it requires OpenSSH and
+an SSH server that permits TCP forwarding.
+
+On the first interactive `ccm`, `ccm tui`, or `ccm open` with no proxy profiles,
+CCM asks whether to use an SSH proxy. Press Enter to save the default No, or
+choose Yes to use an OpenSSH alias or enter a host, port and user. CCM verifies
+the tunnel before saving the profile. `ccm proxy init` opens the same guide
+to change the saved choice. Canceling setup leaves the choice as it was.
+
+An existing single profile is used when no choice is saved. With multiple
+profiles, select one in `ccm proxy init` or pass `--proxy-profile NAME` for one
+invocation. Non-interactive commands never ask. With no choice and no profile,
+they run without CCM's SSH proxy and leave the first interactive choice open.
+If a saved profile has been removed, run `ccm proxy init` to select another
+profile or turn off the proxy.
+
+```sh
+ccm proxy init
+ccm proxy init --ssh-config /path/to/ssh_config
+ccm proxy profile add work --host work-jump
+ccm --proxy-profile work tui
+ccm --proxy-profile work open CHAT_ID --workspace /path/to/workspace
+ccm --proxy-profile work upgrade
+```
+
+`--host` accepts an OpenSSH alias or hostname. Specify `--user` and `--port`
+when you need to override the SSH configuration. To use a custom OpenSSH file
+in `profile add`, pass `--ssh-config` with an absolute path and leave the user
+and port to OpenSSH. If an alias from an `Include` file is absent from the
+guide's list, enter it using the SSH config file and alias option. The tunnel
+uses existing SSH keys, agents, known hosts and
+`ProxyJump` settings. Verify and trust the host key with OpenSSH before starting
+the profile. `--route-target HOST:PORT` on `init` or `profile add` adds a TCP
+test through the tunnel. Domain names in proxied requests are resolved on the
+SSH server.
+
+| Command | Behavior |
+| --- | --- |
+| `ccm proxy init` | Choose and verify the default SSH profile, or save the choice to run without it. |
+| `ccm proxy profile list` | Read stored profiles. |
+| `ccm proxy start NAME` | Start or reuse a gateway and print its verified HTTP URL. |
+| `ccm proxy start NAME --foreground` | Keep the monitor attached to the terminal. |
+| `ccm proxy list` | Check local listener identity and display gateway state. |
+| `ccm proxy doctor NAME` | Report local status, forwarding counters and the log path. |
+| `ccm proxy stop NAME` | Stop the gateway and confirm SSH cleanup. |
+| `ccm proxy prune` | Clear expired ownership records when their processes have released their locks. |
+| `ccm proxy reset NAME` | Stop the profile and clear ordinary recovery limits. Keep its settings and saved port. |
+| `ccm proxy profile remove NAME` | Stop the gateway and remove the saved profile. |
+
+The gateway keeps its public port during SSH recovery. It also reuses that port
+after stop and restart. If another process owns the saved port, the profile
+reports a bind error. Recovery budgets limit SSH retries and gateway restarts
+independently. A cleanup failure stays in the profile for diagnosis.
+
+With a saved or explicit profile, CCM uses the gateway for HTTP(S) downloads and for
+Cursor Agent and HTTP(S)-based pip/Git subprocesses. Python downloads always
+use the selected gateway. Child applications receive standard proxy variables
+and a loopback bypass list. Those applications control which requests honor
+the variables. Browsing and exporting history and `open --dry-run` do not start
+the gateway. With a profile selected, press Ctrl+U to start an explicit TUI
+upgrade. Windows standalone ZIP releases are updated by installing a new ZIP.
+
+Profiles and logs are stored under `$XDG_STATE_HOME/ccm/proxy` (default
+`~/.local/state/ccm/proxy`) on POSIX and `%LOCALAPPDATA%\ccm\proxy` on Windows.
+Set `CCM_PROXY_STATE_DIR` to an absolute path to use separate state for tests.
+
 ## Tests
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_*.py' -v
+go -C proxy test -race ./...
 ```
 
 ## Configuration (optional)
 
 - `CURSOR_AGENT_PATH`: override the `cursor-agent` executable path
-- `CURSOR_AGENT_CONFIG_DIR`: override the config dir (default: `~/.cursor`)
-- `--config-dir <dir>`: override the config dir (same effect as `CURSOR_AGENT_CONFIG_DIR`)
+- `--config-dir <dir>` or `CURSOR_AGENT_CONFIG_DIR`: override the config directory for CCM and the Cursor CLI it launches
+- Without an override, CCM uses Cursor's directory order: `CURSOR_CONFIG_DIR`, `$XDG_CONFIG_HOME/cursor`, then `~/.cursor`
 - `CCM_GITHUB_REPO=owner/name`: override the GitHub repo used by `ccm upgrade` for GitHub-release binaries
 - `CCM_AUTO_INSTALL_CURSOR_AGENT=0`: disable automatic Cursor Agent installation
 - `CCM_CURSOR_AGENT_INSTALLER_URL=<url>`: override the installer metadata source (default: `https://cursor.com/install`)

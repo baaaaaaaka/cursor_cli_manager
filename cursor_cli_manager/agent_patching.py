@@ -20,9 +20,11 @@ _PATCH_MARKER = "CCM_PATCH_AVAILABLE_MODELS_NORMALIZED"
 _PATCH_SIGNATURE = "CCM_PATCH_MODELDETAILS_ONLY"
 _PATCH_AUTORUN_MARKER = "CCM_PATCH_AUTORUN_CONTROLS_DISABLED"
 _PATCH_CACHE_FILENAME = ".ccm-patch-cache.json"
-_PATCH_CACHE_VERSION = 1
+_PATCH_CACHE_VERSION = 2
 _PATCH_AUTORUN_V2 = "promise"  # bumped to invalidate cache after .catch fix
-_PATCH_CACHE_SIGNATURE = "|".join([_PATCH_MARKER, _PATCH_SIGNATURE, _PATCH_AUTORUN_MARKER, _PATCH_AUTORUN_V2])
+_PATCH_CACHE_SIGNATURE = "|".join(
+    [_PATCH_MARKER, _PATCH_SIGNATURE, _PATCH_AUTORUN_MARKER, _PATCH_AUTORUN_V2, "minified-models-v1"]
+)
 _PATCH_CACHE_STATUS_PATCHED = "already_patched"
 _PATCH_CACHE_STATUS_NOT_APPLICABLE = "not_applicable"
 _WRAPPER_VERSIONS_DIR_RE = re.compile(r'^\s*CURSOR_AGENT_VERSIONS_DIR\s*=\s*"([^"\n]+)"', re.MULTILINE)
@@ -217,9 +219,9 @@ def _cache_stat_values(st: os.stat_result) -> Tuple[int, int]:
     return int(mtime_ns), int(st.st_size)
 
 
-def _cache_entry_from_stat(status: str, st: os.stat_result) -> Dict[str, Any]:
+def _cache_entry_from_stat(status: str, st: os.stat_result, *, model_patched: bool) -> Dict[str, Any]:
     mtime_ns, size = _cache_stat_values(st)
-    return {"mtime_ns": mtime_ns, "size": size, "status": status}
+    return {"mtime_ns": mtime_ns, "size": size, "status": status, "model_patched": model_patched}
 
 
 def _cache_entry_matches(entry: Dict[str, Any], st: os.stat_result) -> bool:
@@ -251,13 +253,12 @@ def _load_patch_cache(versions_dir: Path) -> Optional[Dict[str, Dict[str, Any]]]
         mtime_ns = _coerce_int(v.get("mtime_ns"))
         size = _coerce_int(v.get("size"))
         status = v.get("status")
-        if mtime_ns is None or size is None:
+        model_patched = v.get("model_patched")
+        if mtime_ns is None or size is None or not isinstance(model_patched, bool):
             continue
-        if status == "patched":
-            status = _PATCH_CACHE_STATUS_PATCHED
         if status not in (_PATCH_CACHE_STATUS_PATCHED, _PATCH_CACHE_STATUS_NOT_APPLICABLE):
             continue
-        out[k] = {"mtime_ns": mtime_ns, "size": size, "status": status}
+        out[k] = {"mtime_ns": mtime_ns, "size": size, "status": status, "model_patched": model_patched}
     return out
 
 
@@ -310,10 +311,12 @@ class PatchReport:
     scanned_files: int = 0
     patched_files: List[Path] = field(default_factory=list)
     repaired_files: List[Path] = field(default_factory=list)
+    model_patched_files: List[Path] = field(default_factory=list)
     skipped_already_patched: int = 0
     skipped_not_applicable: int = 0
     skipped_cached: int = 0
     errors: List[Tuple[Path, str]] = field(default_factory=list)
+    model_already_patched_files: List[Path] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -324,6 +327,15 @@ _RE_FETCH_USABLE_BLOCK = re.compile(
     r"function\s+fetchUsableModels\(aiServerClient\)\s*\{[\s\S]*?\}\s*(?=(?:\s|/\*[\s\S]*?\*/)*function\s+fetchDefaultModel)",
     flags=re.MULTILINE,
 )
+
+_JS_IDENT = r"[$A-Za-z_][$\w]*"
+_RE_MINIFIED_MODELS = re.compile(
+    rf"async function (?P<name>{_JS_IDENT})\((?P<client>{_JS_IDENT}),(?P<custom>{_JS_IDENT})\)"
+    rf"\{{const\{{models:(?P<models>{_JS_IDENT})\}}=await (?P=client)\.getUsableModels"
+    rf"\((?P<request>new {_JS_IDENT}\.{_JS_IDENT}\(\{{customModelIds:(?P=custom)\?\?\[\]\}}\))\);"
+    r"return (?P=models)\.length>0\?(?P=models):void 0\}"
+)
+
 
 _RE_AUTORUN_CONTROLS_ANY = re.compile(r"\bconst\s+autoRunControls\b")
 _RE_AUTORUN_CONTROLS_ASSIGN = re.compile(
@@ -428,6 +440,36 @@ def _extract_call_arg(block: str) -> Optional[str]:
     return None
 
 
+_NORMALIZE_MODELS = (
+    "        const _ccm_models = (_ccm_r && (_ccm_r.models || _ccm_r.availableModels || _ccm_r.usableModels)) || [];\n"
+    "        const _ccm_normalized = _ccm_models\n"
+    "            .map(m => {\n"
+    "            if (!m)\n"
+    "                return null;\n"
+    "            if (m.supportsAgent === false || m.supports_agent === false)\n"
+    "                return null;\n"
+    "            // Normalize shapes across GetUsableModels vs AvailableModels.\n"
+    "            const modelId = (m.modelId || m.name || m.serverModelName || m.server_model_name || \"\");\n"
+    "            const displayModelId = (m.displayModelId || m.inputboxShortModelName || m.inputbox_short_model_name || m.clientDisplayName || m.client_display_name || m.name || modelId || \"\");\n"
+    "            const displayName = (m.displayName || m.display_name || m.clientDisplayName || m.client_display_name || m.name || displayModelId || modelId || \"\");\n"
+    "            const displayNameShort = (m.displayNameShort || m.display_name_short || m.inputboxShortModelName || m.inputbox_short_model_name);\n"
+    "            if (!modelId || !displayModelId)\n"
+    "                return null;\n"
+    "            // Return only agent.v1.ModelDetails-compatible keys (avoid persisting unknown keys into config).\n"
+    "            const aliases = Array.isArray(m.aliases)\n"
+    "                ? m.aliases.filter(a => typeof a === \"string\")\n"
+    "                : [];\n"
+    "            const out = { modelId, displayModelId, displayName, displayNameShort: (displayNameShort || displayName), aliases };\n"
+    "            if (m.maxMode === true || m.max_mode === true)\n"
+    "                out.maxMode = true;\n"
+    "            if (m.thinkingDetails)\n"
+    "                out.thinkingDetails = m.thinkingDetails;\n"
+    "            return out;\n"
+    "        })\n"
+    "            .filter(Boolean);\n"
+)
+
+
 def _patch_fetch_usable_models_block(block: str) -> Optional[str]:
     """
     Return a patched replacement block, or None if not patchable.
@@ -456,37 +498,29 @@ def _patch_fetch_usable_models_block(block: str) -> Optional[str]:
         f"            : aiServerClient.getAvailableModels\n"
         f"                ? aiServerClient.getAvailableModels({arg})\n"
         f"                : aiServerClient.getUsableModels({arg}));\n"
-        "        const _ccm_models = (_ccm_r && (_ccm_r.models || _ccm_r.availableModels || _ccm_r.usableModels)) || [];\n"
-        "        const _ccm_normalized = _ccm_models\n"
-        "            .map(m => {\n"
-        "            if (!m)\n"
-        "                return null;\n"
-        "            if (m.supportsAgent === false || m.supports_agent === false)\n"
-        "                return null;\n"
-        "            // Normalize shapes across GetUsableModels vs AvailableModels.\n"
-        "            const modelId = (m.modelId || m.name || m.serverModelName || m.server_model_name || \"\");\n"
-        "            const displayModelId = (m.displayModelId || m.inputboxShortModelName || m.inputbox_short_model_name || m.clientDisplayName || m.client_display_name || m.name || modelId || \"\");\n"
-        "            const displayName = (m.displayName || m.display_name || m.clientDisplayName || m.client_display_name || m.name || displayModelId || modelId || \"\");\n"
-        "            const displayNameShort = (m.displayNameShort || m.display_name_short || m.inputboxShortModelName || m.inputbox_short_model_name);\n"
-        "            if (!modelId || !displayModelId)\n"
-        "                return null;\n"
-        "            // Return only agent.v1.ModelDetails-compatible keys (avoid persisting unknown keys into config).\n"
-        "            const aliases = Array.isArray(m.aliases)\n"
-        "                ? m.aliases.filter(a => typeof a === \"string\")\n"
-        "                : [];\n"
-        "            const out = { modelId, displayModelId, displayName, displayNameShort: (displayNameShort || displayName), aliases };\n"
-        "            if (m.maxMode === true || m.max_mode === true)\n"
-        "                out.maxMode = true;\n"
-        "            if (m.thinkingDetails)\n"
-        "                out.thinkingDetails = m.thinkingDetails;\n"
-        "            return out;\n"
-        "        })\n"
-        "            .filter(Boolean);\n"
-        "        const models = _ccm_normalized;\n"
+        + _NORMALIZE_MODELS
+        + "        const models = _ccm_normalized;\n"
         "        return models.length > 0 ? models : undefined;\n"
         "    });\n"
         "}\n"
         f"/* {_PATCH_MARKER} {_PATCH_SIGNATURE} */\n"
+    )
+
+
+def _patch_minified_models(match: re.Match) -> str:
+    client, custom = match.group("client", "custom")
+    header, original_body = match.group(0).split("{", 1)
+    return (
+        f"{header}{{"
+        f"if(!{custom}?.length && typeof {client}.availableModels === 'function'){{\n"
+        "try {\n"
+        f"        const _ccm_r = await {client}.availableModels({{}});\n"
+        + _NORMALIZE_MODELS
+        + "        if (_ccm_normalized.length) return _ccm_normalized;\n"
+        "        } catch (_) {}\n"
+        "    }\n"
+        + original_body
+        + f"/* {_PATCH_MARKER} {_PATCH_SIGNATURE} */"
     )
 
 
@@ -502,7 +536,7 @@ def patch_cursor_agent_models(
     - disable team auto-run restrictions by forcing `autoRunControls` to null.
 
     This is a best-effort patch:
-    - It only touches files that contain either `fetchUsableModels(aiServerClient)` or `const autoRunControls = ...`.
+    - It only modifies recognized model and auto-run code.
     - It is idempotent (skips files already patched).
     - It caches scan results to avoid re-reading unchanged files (unless force/dry_run).
     """
@@ -536,6 +570,8 @@ def patch_cursor_agent_models(
                 cached = cache_files.get(cache_key)
                 if isinstance(cached, dict) and _cache_entry_matches(cached, st):
                     rep.skipped_cached += 1
+                    if cached["model_patched"]:
+                        rep.model_already_patched_files.append(p)
                     status = cached.get("status")
                     if status == _PATCH_CACHE_STATUS_PATCHED:
                         rep.skipped_already_patched += 1
@@ -553,24 +589,20 @@ def patch_cursor_agent_models(
                 continue
 
             new_txt = txt
-            changed = False
 
-            # Patch #1: model enumeration (AvailableModels).
-            model_file_already_patched = _PATCH_MARKER in new_txt and _PATCH_SIGNATURE in new_txt
-            model_match = None if model_file_already_patched else _RE_FETCH_USABLE_BLOCK.search(new_txt)
-            model_found = model_file_already_patched or (model_match is not None)
-            model_unpatchable = False
-            model_already_patched = model_file_already_patched
-            if model_match is not None:
-                old_block = model_match.group(0)
-                new_block = _patch_fetch_usable_models_block(old_block)
-                if new_block:
-                    candidate = new_txt[: model_match.start()] + new_block + new_txt[model_match.end() :]
-                    if candidate != new_txt:
-                        new_txt = candidate
-                        changed = True
+            model_already_patched = _PATCH_MARKER in txt and _PATCH_SIGNATURE in txt
+            if model_already_patched:
+                rep.model_already_patched_files.append(p)
+            else:
+                model_match = _RE_FETCH_USABLE_BLOCK.search(txt)
+                if model_match is not None:
+                    replacement = _patch_fetch_usable_models_block(model_match.group(0))
+                    if replacement:
+                        new_txt = txt[: model_match.start()] + replacement + txt[model_match.end() :]
                 else:
-                    model_unpatchable = True
+                    new_txt = _RE_MINIFIED_MODELS.sub(_patch_minified_models, txt)
+            model_changed = new_txt != txt
+            changed = model_changed
 
             # Patch #2: autoRunControls -> null.
             auto_found = (
@@ -592,8 +624,6 @@ def patch_cursor_agent_models(
                 if auto_found or model_already_patched:
                     rep.skipped_already_patched += 1
                     status = _PATCH_CACHE_STATUS_PATCHED
-                elif model_found and model_unpatchable:
-                    rep.skipped_not_applicable += 1
                 else:
                     rep.skipped_not_applicable += 1
                 if new_cache is not None:
@@ -603,11 +633,13 @@ def patch_cursor_agent_models(
                         except Exception:
                             st = None
                     if st is not None:
-                        new_cache[cache_key] = _cache_entry_from_stat(status, st)
+                        new_cache[cache_key] = _cache_entry_from_stat(status, st, model_patched=model_already_patched)
                 continue
 
             if dry_run:
                 rep.patched_files.append(p)
+                if model_changed:
+                    rep.model_patched_files.append(p)
                 if repaired:
                     rep.repaired_files.append(p)
                 continue
@@ -640,6 +672,8 @@ def patch_cursor_agent_models(
                     except Exception:
                         pass
                 rep.patched_files.append(p)
+                if model_changed:
+                    rep.model_patched_files.append(p)
                 if repaired:
                     rep.repaired_files.append(p)
                 if new_cache is not None:
@@ -648,7 +682,9 @@ def patch_cursor_agent_models(
                     except Exception:
                         st_after = None
                     if st_after is not None:
-                        new_cache[cache_key] = _cache_entry_from_stat(_PATCH_CACHE_STATUS_PATCHED, st_after)
+                        new_cache[cache_key] = _cache_entry_from_stat(
+                            _PATCH_CACHE_STATUS_PATCHED, st_after, model_patched=model_already_patched or model_changed
+                        )
             except Exception as e:
                 rep.errors.append((p, f"write failed: {e}"))
                 continue

@@ -7,12 +7,19 @@ import subprocess
 import threading
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 from cursor_cli_manager.update import _default_runner
-from cursor_cli_manager.agent_paths import CursorAgentDirs, ENV_CURSOR_AGENT_CONFIG_DIR, get_cursor_agent_dirs
+from cursor_cli_manager.proxy import proxy_environment, proxy_subprocess_options
+from cursor_cli_manager.agent_paths import (
+    CursorAgentDirs,
+    ENV_CURSOR_AGENT_CONFIG_DIR,
+    ENV_CURSOR_CONFIG_DIR,
+    get_cursor_agent_dirs,
+)
 from cursor_cli_manager.ccm_config import has_legacy_install
 from cursor_cli_manager.cursor_agent_install import ENV_CURSOR_AGENT_PATH, resolve_cursor_agent_installation
 
@@ -433,6 +440,8 @@ def run_cursor_agent_launch_smoke(
     env = dict(os.environ)
     if cursor_agent_config_dir is not None:
         env[ENV_CURSOR_AGENT_CONFIG_DIR] = str(cursor_agent_config_dir)
+        env[ENV_CURSOR_CONFIG_DIR] = str(cursor_agent_config_dir)
+    env = proxy_environment(env, cursor=True) or env
     if sys.platform.startswith("win"):
         return _run_cursor_agent_launch_smoke_windows(
             cmd,
@@ -481,6 +490,7 @@ def _run_cursor_agent(cmd: List[str]) -> Tuple[int, str]:
         stdout=None,
         stderr=subprocess.PIPE,
         text=True,
+        **proxy_subprocess_options(cursor=True),
     )
     stderr_chunks: List[str] = []
 
@@ -524,6 +534,7 @@ def _run_cursor_agent_interactive(cmd: List[str]) -> int:
         stdin=None,
         stdout=None,
         stderr=None,
+        **proxy_subprocess_options(cursor=True),
     )
     try:
         rc = p.wait()
@@ -539,6 +550,9 @@ def _run_cursor_agent_interactive(cmd: List[str]) -> int:
 def _exec_or_run_cursor_agent(cmd: List[str]) -> "os.NoReturn":
     if _should_use_windows_interactive_runner(cmd):
         raise SystemExit(_run_cursor_agent_interactive(cmd))
+    env = proxy_environment(cursor=True)
+    if env is not None:
+        os.execvpe(cmd[0], cmd, env)
     os.execvp(cmd[0], cmd)
 
 
@@ -651,6 +665,22 @@ def exec_resume_command(cmd: List[str]) -> "os.NoReturn":
     _exec_or_run_cursor_agent(cmd)
 
 
+@contextmanager
+def _launch_config(config_dir: Optional[Path]) -> Iterator[None]:
+    if config_dir is None:
+        yield
+        return
+    previous = os.environ.get(ENV_CURSOR_CONFIG_DIR)
+    os.environ[ENV_CURSOR_CONFIG_DIR] = str(config_dir)
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(ENV_CURSOR_CONFIG_DIR, None)
+        else:
+            os.environ[ENV_CURSOR_CONFIG_DIR] = previous
+
+
 def exec_resume_chat(
     chat_id: str,
     *,
@@ -665,6 +695,8 @@ def exec_resume_chat(
     so we `chdir()` into the workspace path (when available) to ensure the
     correct chat store is used.
     """
+    if agent_dirs is not None:
+        agent_dirs = CursorAgentDirs(agent_dirs.config_dir.absolute())
     old_cwd: Optional[Path] = None
     if workspace_path is not None:
         try:
@@ -685,7 +717,8 @@ def exec_resume_chat(
             print(f"Launching cursor-agent{ws}… (resume {chat_id})", file=sys.stderr, flush=True)
         except Exception:
             pass
-        _exec_cursor_agent(cmd)
+        with _launch_config(agent_dirs.config_dir if agent_dirs else None):
+            _exec_cursor_agent(cmd)
     finally:
         if old_cwd is not None:
             try:
@@ -706,6 +739,8 @@ def exec_new_chat(
     Similar to `exec_resume_chat`, we `chdir()` into the workspace to ensure the
     correct ~/.cursor/chats/<md5(cwd)> bucket is used.
     """
+    if agent_dirs is not None:
+        agent_dirs = CursorAgentDirs(agent_dirs.config_dir.absolute())
     old_cwd: Optional[Path] = None
     if workspace_path is not None:
         try:
@@ -725,7 +760,8 @@ def exec_new_chat(
             print(f"Launching cursor-agent{ws}…", file=sys.stderr, flush=True)
         except Exception:
             pass
-        _exec_cursor_agent(cmd)
+        with _launch_config(agent_dirs.config_dir if agent_dirs else None):
+            _exec_cursor_agent(cmd)
     finally:
         if old_cwd is not None:
             try:

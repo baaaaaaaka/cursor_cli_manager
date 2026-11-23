@@ -12,6 +12,8 @@ import zipfile
 from pathlib import Path
 from typing import Iterable, Optional, Tuple
 
+from cursor_cli_manager.proxy import proxy_subprocess_options, proxy_urlopen
+
 
 _RIPGREP_API_URL = "https://api.github.com/repos/BurntSushi/ripgrep/releases/latest"
 _RIPGREP_TIMEOUT_S = 20
@@ -31,7 +33,7 @@ def _run_pip_install(packages: Iterable[str]) -> bool:
         cmd.append("--user")
     cmd.extend(packages)
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL, **proxy_subprocess_options(package_manager=True))
         return True
     except Exception as e:
         try:
@@ -118,7 +120,7 @@ def _fetch_ripgrep_asset(arch_suffix: str) -> Optional[Tuple[str, str]]:
         if gh_token:
             headers["Authorization"] = f"token {gh_token}"
         req = urllib.request.Request(_RIPGREP_API_URL, headers=headers)
-        with urllib.request.urlopen(req, timeout=_RIPGREP_TIMEOUT_S) as resp:
+        with proxy_urlopen(req, timeout=_RIPGREP_TIMEOUT_S) as resp:
             data = json.loads(resp.read().decode("utf-8", errors="replace"))
     except Exception as e:
         try:
@@ -146,7 +148,7 @@ def _fetch_ripgrep_asset(arch_suffix: str) -> Optional[Tuple[str, str]]:
 def _download_file(url: str, dest: Path) -> bool:
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "ccm"})
-        with urllib.request.urlopen(req, timeout=_RIPGREP_TIMEOUT_S) as resp:
+        with proxy_urlopen(req, timeout=_RIPGREP_TIMEOUT_S) as resp:
             dest.write_bytes(resp.read())
         return True
     except Exception as e:

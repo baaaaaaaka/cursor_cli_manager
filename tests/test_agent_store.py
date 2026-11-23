@@ -1,8 +1,10 @@
 import binascii
+import hashlib
 import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from typing import Optional, Tuple
 from unittest import mock
@@ -31,6 +33,44 @@ def _make_store_db(db_path: Path, *, meta_obj: dict, blob_id: str, blob_data: by
 
 
 class TestAgentStore(unittest.TestCase):
+    def test_protobuf_checkpoint_preview_and_history(self) -> None:
+        def field(number: int, value: bytes) -> bytes:
+            tag = number << 3 | 2
+            key = bytes([tag]) if tag < 128 else bytes([tag & 127 | 128, tag >> 7])
+            return key + bytes([len(value)]) + value
+
+        blobs = {}
+
+        def add(data: bytes) -> bytes:
+            ref = hashlib.sha256(data).digest()
+            blobs[ref.hex()] = data
+            return ref
+
+        first = add(field(1, b"first question"))
+        answer = add(field(1, field(1, b"first answer")))
+        last_text = add("第二个问题".encode("utf-8"))
+        last = add(field(18, last_text))
+        first_turn = add(field(1, field(1, first) + field(2, answer)))
+        second_turn = add(field(1, field(1, last)))
+        earlier_root = add(field(8, first_turn))
+        root = add(field(8, first_turn) + field(8, second_turn))
+        meta = {"agentId": "chat", "latestRootBlobId": root.hex()}
+
+        with tempfile.TemporaryDirectory() as td:
+            db = Path(td) / "store.db"
+            _make_store_db(db, meta_obj=meta, blob_id=root.hex(), blob_data=blobs.pop(root.hex()))
+            with closing(sqlite3.connect(db)) as con, con:
+                con.executemany("INSERT INTO blobs VALUES (?, ?)", blobs.items())
+            first_messages = [("user", "first question"), ("assistant", "first answer")]
+            self.assertEqual(extract_initial_messages(db, max_messages=2), first_messages)
+            self.assertEqual(extract_recent_messages(db, max_messages=1), [("user", "第二个问题")])
+            self.assertEqual(read_chat_meta_and_preview(db)[1:], ("user", "第二个问题"))
+            self.assertEqual(extract_recent_messages(db, max_blobs=None), first_messages + [("user", "第二个问题")])
+            meta["latestRootBlobId"] = earlier_root.hex()
+            with closing(sqlite3.connect(db)) as con, con:
+                con.execute("UPDATE meta SET value = ? WHERE key = '0'", (json.dumps(meta).encode().hex(),))
+            self.assertEqual(extract_recent_messages(db, max_blobs=None), first_messages)
+
     def _extract_messages_slow_reference(
         self,
         con: sqlite3.Connection,

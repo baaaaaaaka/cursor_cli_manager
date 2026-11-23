@@ -11,7 +11,7 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 
-from cursor_cli_manager.agent_paths import CursorAgentDirs, ENV_CURSOR_AGENT_CONFIG_DIR
+from cursor_cli_manager.agent_paths import CursorAgentDirs, ENV_CURSOR_AGENT_CONFIG_DIR, ENV_CURSOR_CONFIG_DIR
 from cursor_cli_manager.ccm_config import CcmConfig, LEGACY_VERSION, save_ccm_config
 from cursor_cli_manager.opening import (
     ENV_CURSOR_AGENT_PATH,
@@ -168,6 +168,7 @@ class TestOpening(unittest.TestCase):
                 )
         env = backend.call_args[1]["env"]
         self.assertEqual(env[ENV_CURSOR_AGENT_CONFIG_DIR], str(cfg))
+        self.assertEqual(env[ENV_CURSOR_CONFIG_DIR], str(cfg))
 
     def test_run_cursor_agent_launch_smoke_windows_reports_quick_exit_output(self) -> None:
         import cursor_cli_manager.opening as opening

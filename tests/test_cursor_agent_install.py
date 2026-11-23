@@ -495,6 +495,30 @@ class TestCursorAgentInstall(unittest.TestCase):
             self.assertEqual(seen["kwargs"].get("prefix"), ".ccm-launch-smoke-")
             self.assertNotIn("dir", seen["kwargs"])
 
+    def test_require_model_changes_rejects_and_rolls_back_other_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            versions = Path(td) / "versions"
+            version = versions / "test-version"
+            version.mkdir(parents=True)
+            js = version / "1234.index.js"
+            js.write_bytes(b"original")
+
+            def patch_other_code(**_kwargs):
+                js.write_bytes(b"changed")
+                return SimpleNamespace(patched_files=[js], repaired_files=[], model_patched_files=[], errors=[])
+
+            with patch.object(cai, "patch_cursor_agent_models", side_effect=patch_other_code), patch.object(
+                cai, "_verify_patched_cursor_agent_launch"
+            ) as verify:
+                with self.assertRaisesRegex(RuntimeError, "model patch made no changes"):
+                    cai.apply_verified_cursor_agent_patch(
+                        versions_dir=versions, cursor_agent_path=str(version / "cursor-agent"),
+                        require_model_changes=True,
+                    )
+
+            self.assertEqual(js.read_bytes(), b"original")
+            verify.assert_not_called()
+
     def test_apply_verified_cursor_agent_patch_ignores_unrelated_scan_errors(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

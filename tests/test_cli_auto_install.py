@@ -1,9 +1,11 @@
 import io
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -121,6 +123,8 @@ class TestCliAutoInstall(unittest.TestCase):
         report = SimpleNamespace(
             patched_files=[Path("a.js")],
             repaired_files=[Path("b.js")],
+            model_patched_files=[],
+            model_already_patched_files=[Path("a.js")],
             skipped_already_patched=2,
             skipped_not_applicable=3,
             errors=[(Path("c.js"), "boom")],
@@ -151,7 +155,8 @@ class TestCliAutoInstall(unittest.TestCase):
         self.assertEqual(rc, 0)
         text = out.getvalue()
         self.assertIn("- versions dir:", text)
-        self.assertIn("- model patch dry-run: would_patch=1 would_repair=1 already_patched=2 not_applicable=3 errors=1", text)
+        self.assertIn("- model patch dry-run: would_patch=0 already_patched=1", text)
+        self.assertIn("- bundle patch dry-run: would_patch=1 would_repair=1 already_patched=2 not_applicable=3 errors=1", text)
         self.assertIn("Discovered workspaces: 1", text)
         self.assertIn(f"- ws ({ws.workspace_path})", text)
         patch_models.assert_called_once()
@@ -187,8 +192,48 @@ class TestCliAutoInstall(unittest.TestCase):
                 rc = main(["--config-dir", td, "open", "abc123", "--workspace", "/tmp/ws", "--dry-run"])
         self.assertEqual(rc, 0)
         ensure.assert_not_called()
-        self.assertIn("--resume abc123", out.getvalue())
-        self.assertIn("cd ", out.getvalue())
+        self.assertIn("--resume", out.getvalue())
+        self.assertIn("abc123", out.getvalue())
+        self.assertIn("CURSOR_CONFIG_DIR", out.getvalue())
+
+    @unittest.skipIf(sys.platform.startswith("win"), "requires a POSIX shell")
+    def test_open_dry_run_command_preserves_config_and_quoted_arguments(self) -> None:
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            workspace = root / "workspace ' & $(false)"
+            workspace.mkdir()
+            config = root / "Cursor config ' & $HOME"
+            agent = root / "Cursor agent ' &"
+            agent.write_text('#!/bin/sh\nprintf "%s\\n" "$PWD" "$CURSOR_CONFIG_DIR" "$@"\n', encoding="utf-8")
+            agent.chmod(0o700)
+            chat_id = "chat ' & $HOME"
+            with patch("cursor_cli_manager.opening.resolve_cursor_agent_path", return_value=str(agent)), patch(
+                "cursor_cli_manager.opening.get_cursor_agent_flags", return_value=[]
+            ), redirect_stdout(out):
+                rc = main(["--config-dir", str(config), "open", chat_id, "--workspace", str(workspace), "--dry-run"])
+            self.assertEqual(rc, 0)
+            result = subprocess.run(
+                ["sh", "-c", out.getvalue()],
+                env={**os.environ, "CURSOR_CONFIG_DIR": str(root / "wrong config")},
+                check=True,
+                stdout=subprocess.PIPE,
+                universal_newlines=True,
+            )
+            self.assertEqual(
+                result.stdout.splitlines(),
+                [str(workspace), str(config), "--workspace", str(workspace), "--resume", chat_id],
+            )
+
+    def test_open_dry_run_formats_windows_paths_for_powershell(self) -> None:
+        workspace = PureWindowsPath(r"C:\work space\user's project")
+        config = PureWindowsPath(r"C:\Cursor config\user's profile")
+        agent = r"C:\Program Files\Cursor Agent\cursor-agent.exe"
+        with patch.object(cli.sys, "platform", "win32"):
+            command = cli._format_open_command([agent, "--workspace", str(workspace)], workspace, config)
+        self.assertIn(r"Push-Location -LiteralPath 'C:\work space\user''s project'", command)
+        self.assertIn(r"$env:CURSOR_CONFIG_DIR = 'C:\Cursor config\user''s profile'", command)
+        self.assertIn(r"& 'C:\Program Files\Cursor Agent\cursor-agent.exe' '--workspace' 'C:\work space\user''s project'", command)
 
     def test_open_exec_triggers_auto_install(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -343,6 +388,8 @@ class TestCliAutoInstall(unittest.TestCase):
             scanned_files=1,
             patched_files=[Path("a.js")],
             repaired_files=[],
+            model_patched_files=[Path("a.js")],
+            model_already_patched_files=[],
             skipped_already_patched=0,
             skipped_not_applicable=0,
             skipped_cached=0,
@@ -362,6 +409,7 @@ class TestCliAutoInstall(unittest.TestCase):
             rc = main(["--config-dir", td, "--cursor-agent-versions-dir", td, "patch-models"])
         self.assertEqual(rc, 0)
         self.assertEqual(apply_patch.call_args[1]["cursor_agent_path"], "/tmp/from-vdir/cursor-agent")
+        self.assertIn("model_patched_files: 1", out.getvalue())
 
     def test_patch_models_uses_executable_from_env_selected_versions_dir(self) -> None:
         out = io.StringIO()
@@ -369,6 +417,8 @@ class TestCliAutoInstall(unittest.TestCase):
             scanned_files=1,
             patched_files=[Path("a.js")],
             repaired_files=[],
+            model_patched_files=[Path("a.js")],
+            model_already_patched_files=[],
             skipped_already_patched=0,
             skipped_not_applicable=0,
             skipped_cached=0,
@@ -392,6 +442,21 @@ class TestCliAutoInstall(unittest.TestCase):
             rc = main(["--config-dir", td, "patch-models"])
         self.assertEqual(rc, 0)
         self.assertEqual(apply_patch.call_args[1]["cursor_agent_path"], "/tmp/from-env/cursor-agent")
+
+    def test_patch_models_dry_run_does_not_report_legacy_marker_as_model_patch(self) -> None:
+        out = io.StringIO()
+        with tempfile.TemporaryDirectory() as td:
+            versions = Path(td) / "versions"
+            version = versions / "legacy-test-version"
+            version.mkdir(parents=True)
+            (version / "legacy.index.js").write_text("/* CCM_PATCH_AUTORUN_CONTROLS_DISABLED */", encoding="utf-8")
+            with patch("cursor_cli_manager.cli.has_legacy_install", return_value=True), redirect_stdout(out):
+                rc = main(["--config-dir", td, "--cursor-agent-versions-dir", str(versions), "patch-models", "--dry-run"])
+        self.assertEqual(rc, 0)
+        self.assertIn("already_patched: 1", out.getvalue().splitlines())
+        self.assertIn("model_would_patch: 0", out.getvalue().splitlines())
+        self.assertIn("model_already_patched: 0", out.getvalue().splitlines())
+        self.assertIn("No compatible model code found", out.getvalue())
 
     def test_patch_models_returns_0_without_legacy_install(self) -> None:
         with tempfile.TemporaryDirectory() as td, patch("cursor_cli_manager.cli.has_legacy_install", return_value=False):

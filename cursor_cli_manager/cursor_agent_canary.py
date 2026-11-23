@@ -107,10 +107,11 @@ def run_cursor_agent_patch_canary(
                 agent_dirs=agent_dirs,
                 force=True,
                 require_changes=True,
+                require_model_changes=True,
             )
             log(
                 "verified_patch="
-                f"patched:{len(rep.patched_files)} repaired:{len(rep.repaired_files)} "
+                f"patched:{len(rep.patched_files)} models:{len(rep.model_patched_files)} repaired:{len(rep.repaired_files)} "
                 f"already_patched:{rep.skipped_already_patched} not_applicable:{rep.skipped_not_applicable}"
             )
             return result

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
+from cursor_cli_manager.agent_proto import checkpoint_messages
+
 
 @dataclass(frozen=True)
 class AgentChatMeta:
@@ -247,7 +249,7 @@ _ROLE_MARKER = b"\"role\""
 # extracted message list per DB+stamp so repeated preview/export is instant.
 _FULL_CACHE_LOCK = threading.Lock()
 # key: (db_path, roles_tuple, stamp) -> (messages, approx_bytes)
-_FULL_CACHE: "OrderedDict[Tuple[str, Tuple[str, ...], Tuple[int, int]], Tuple[List[Tuple[str, str]], int]]" = OrderedDict()
+_FULL_CACHE: "OrderedDict[Tuple[str, Tuple[str, ...], Tuple[int, int, str]], Tuple[List[Tuple[str, str]], int]]" = OrderedDict()
 _FULL_CACHE_BYTES = 0
 _FULL_CACHE_MAX_ENTRIES = 24
 _FULL_CACHE_MAX_BYTES = 32 * 1024 * 1024  # 32 MiB
@@ -268,28 +270,32 @@ def _approx_messages_bytes(msgs: Sequence[Tuple[str, str]]) -> int:
     return total
 
 
-def _blobs_stamp(con: sqlite3.Connection) -> Tuple[int, int]:
+def _blobs_stamp(con: sqlite3.Connection) -> Tuple[int, int, str]:
     """
     Compute a cheap, content-sensitive stamp for the blobs table.
 
     We include both MAX(rowid) and SUM(LENGTH(data)) so that the stamp changes on
-    appends and most in-place updates, without reading all blob contents into Python.
+    appends and most in-place updates. Include metadata so changing the current
+    checkpoint invalidates the cache even if all of its blobs already exist.
     """
     try:
         row = con.execute(
             "SELECT COALESCE(MAX(rowid), 0), COALESCE(SUM(LENGTH(data)), 0) FROM blobs"
         ).fetchone()
     except sqlite3.Error:
-        return (0, 0)
+        return (0, 0, "")
     if not row:
-        return (0, 0)
+        return (0, 0, "")
     try:
-        return (int(row[0] or 0), int(row[1] or 0))
-    except Exception:
-        return (0, 0)
+        meta = con.execute(
+            "SELECT value FROM meta WHERE key IN ('0', 'latestRootBlobId') ORDER BY key LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error:
+        meta = None
+    return (int(row[0]), int(row[1]), str(meta[0]) if meta else "")
 
 
-def _full_cache_get(db_key: str, roles_key: Tuple[str, ...], stamp: Tuple[int, int]) -> Optional[List[Tuple[str, str]]]:
+def _full_cache_get(db_key: str, roles_key: Tuple[str, ...], stamp: Tuple[int, int, str]) -> Optional[List[Tuple[str, str]]]:
     k = (db_key, roles_key, stamp)
     with _FULL_CACHE_LOCK:
         hit = _FULL_CACHE.get(k)
@@ -299,7 +305,7 @@ def _full_cache_get(db_key: str, roles_key: Tuple[str, ...], stamp: Tuple[int, i
         return hit[0]
 
 
-def _full_cache_put(db_key: str, roles_key: Tuple[str, ...], stamp: Tuple[int, int], msgs: List[Tuple[str, str]]) -> None:
+def _full_cache_put(db_key: str, roles_key: Tuple[str, ...], stamp: Tuple[int, int, str], msgs: List[Tuple[str, str]]) -> None:
     global _FULL_CACHE_BYTES
     k = (db_key, roles_key, stamp)
     b = _approx_messages_bytes(msgs)
@@ -477,9 +483,27 @@ def _extract_messages_from_connection(
     max_blobs: Optional[int] = 200,
     roles: Sequence[str] = ("user", "assistant"),
     from_start: bool = False,
+    read_checkpoint: bool = True,
 ) -> List[Tuple[str, str]]:
     if max_messages is not None and max_messages <= 0:
         return []
+    if max_blobs is not None and max_blobs <= 0:
+        return []
+    if read_checkpoint:
+        try:
+            meta = _read_chat_meta_from_connection(con)
+        except sqlite3.Error:
+            meta = None
+        if meta and meta.latest_root_blob_id:
+            root = _read_blob_from_connection(con, meta.latest_root_blob_id)
+            if root:
+                messages = checkpoint_messages(
+                    root, lambda ref: _read_blob_from_connection(con, ref),
+                    roles=roles, reverse=not from_start,
+                    max_messages=max_messages, max_blobs=max_blobs,
+                )
+                if messages is not None:
+                    return messages
 
     seen: set[Tuple[str, str]] = set()
     out: List[Tuple[str, str]] = []
@@ -593,6 +617,12 @@ def _extract_last_message_preview_from_connection(
 ) -> Tuple[Optional[str], Optional[str]]:
     blob = _read_blob_from_connection(con, latest_root_blob_id)
     if blob:
+        messages = checkpoint_messages(
+            blob, lambda ref: _read_blob_from_connection(con, ref),
+            roles=("user", "assistant"), reverse=True, max_messages=1, max_blobs=200,
+        )
+        if messages is not None:
+            return messages[-1] if messages else (None, None)
         last_role: Optional[str] = None
         last_text: Optional[str] = None
 
@@ -611,7 +641,7 @@ def _extract_last_message_preview_from_connection(
         if last_text:
             return last_role, last_text
 
-    msgs = _extract_messages_from_connection(con, max_messages=1, max_blobs=200, roles=("user", "assistant"), from_start=False)
+    msgs = _extract_messages_from_connection(con, max_messages=1, max_blobs=200, read_checkpoint=False)
     if msgs:
         role, text = msgs[-1]
         return role, text
@@ -772,4 +802,3 @@ def read_chat_meta_and_preview(
 
     res = _with_ro_connection(store_db, _op)
     return res if isinstance(res, tuple) else (None, None, None)
-
