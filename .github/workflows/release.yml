@@ -543,12 +543,28 @@ jobs:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          path: dist
-          merge-multiple: true
+          path: artifacts
 
       - name: Prepare checksums.txt
         run: |
           set -euxo pipefail
+          shopt -s nullglob
+          mkdir dist
+          for asset in artifacts/*/*; do
+            name=${asset##*/}
+            if [[ -e "dist/$name" ]]; then
+              echo "Duplicate release asset $name" >&2
+              exit 1
+            fi
+            cp "$asset" "dist/$name"
+          done
+          wheels=(dist/*.whl)
+          mac_intel=(dist/*-macosx_*_x86_64.whl)
+          mac_arm=(dist/*-macosx_*_arm64.whl)
+          if (( ${#wheels[@]} != 4 || ${#mac_intel[@]} != 1 || ${#mac_arm[@]} != 1 )); then
+            echo 'Expected four platform wheels, including one for each macOS architecture' >&2
+            exit 1
+          fi
           (cd dist && sha256sum ccm-* *.whl > checksums.txt)
           ls -la dist
 

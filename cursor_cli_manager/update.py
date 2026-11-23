@@ -350,6 +350,8 @@ def perform_update(
                 rel = fetch_latest_release(repo, timeout_s=timeout_s)
             else:
                 rel = fetch_latest_release(repo, timeout_s=timeout_s, fetch=fetch)
+            if is_version_newer(__version__, rel.version):
+                return False, f"Installed CCM v{__version__} is newer than published v{rel.version}."
             if not (isinstance(asset_name, str) and asset_name.strip()):
                 asset_name = select_release_asset_name()
 

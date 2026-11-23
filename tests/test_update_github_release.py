@@ -14,6 +14,15 @@ from cursor_cli_manager.github_release import LINUX_ASSET_COMMON, ReleaseInfo
 
 
 class TestUpdateGithubRelease(unittest.TestCase):
+    def test_perform_update_does_not_downgrade_with_an_older_published_release(self) -> None:
+        with patch.object(sys, "frozen", True, create=True), patch(
+            "cursor_cli_manager.update.__version__", "0.7.7"
+        ), patch("cursor_cli_manager.update.download_and_install_release_bundle") as install:
+            ok, output = perform_update(fetch=lambda *_args: b'{"tag_name":"v0.7.6"}')
+        self.assertFalse(ok)
+        self.assertIn("newer than published v0.7.6", output)
+        install.assert_not_called()
+
     def test_check_for_update_github_release_when_frozen(self) -> None:
         def fake_fetch(url: str, _timeout_s: float, _headers: dict) -> bytes:
             # Only the GitHub API call should happen for check_for_update.
@@ -110,6 +119,8 @@ class TestUpdateGithubRelease(unittest.TestCase):
                 sys, "frozen", True, create=True
             ), patch.object(
                 sys, "executable", str(exe_link), create=True
+            ), patch(
+                "cursor_cli_manager.update.__version__", "0.5.7"
             ), patch(
                 "cursor_cli_manager.update.fetch_latest_release",
                 return_value=ReleaseInfo(tag="v0.5.8", version="0.5.8"),

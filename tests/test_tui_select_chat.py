@@ -3,9 +3,11 @@ import unittest
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+from cursor_cli_manager import __version__
 from cursor_cli_manager.models import AgentChat, AgentWorkspace
+from cursor_cli_manager.proxy import selected_proxy
 from cursor_cli_manager.tui import ExportPendingExit, Theme, UpdateRequested, select_chat
 from cursor_cli_manager.update import UpdateStatus
 
@@ -225,6 +227,22 @@ class TestTuiSelectChat(unittest.TestCase):
                     loader=loader,
                     update_status=UpdateStatus(supported=True, update_available=True),
                 )
+
+    def test_managed_proxy_does_not_advertise_an_unconfirmed_upgrade(self) -> None:
+        check = Mock()
+        with tempfile.TemporaryDirectory() as td, selected_proxy("work"), patch(
+            "cursor_cli_manager.tui._StatusBar.draw",
+        ) as draw:
+            ws = self._workspace(Path(td))
+            with self.assertRaises(UpdateRequested):
+                self._run_select_chat(
+                    stdscr=_FakeWindow(30, 120, inputs=[21]),
+                    workspaces=[ws],
+                    loader=_FakeBackgroundLoader(chats_by_workspace={}),
+                    extra_patches=[patch("cursor_cli_manager.tui.check_for_update", new=check)],
+                )
+            check.assert_not_called()
+            self.assertEqual(draw.call_args[1]["right"], f"v{__version__}")
 
     def test_select_chat_ctrl_s_saves_cached_full_preview(self) -> None:
         import curses

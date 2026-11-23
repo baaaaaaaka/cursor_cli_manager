@@ -2035,9 +2035,7 @@ def select_chat(
         # - Update available: bold keybinding hint
         update_right = f"v{__version__}"
         update_right_attr = 0
-        if managed_proxy:
-            update_right += "  Ctrl+U upgrade"
-        elif update_status is None:
+        if update_status is None:
             if update_checking:
                 update_right = f"v{__version__} checking"
         elif update_status.supported:
