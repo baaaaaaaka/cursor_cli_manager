@@ -55,6 +55,23 @@ func TestSSHProcessStopsDescendant(t *testing.T) {
 	}
 }
 
+func TestSSHProcessClosesAfterChildExit(t *testing.T) {
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	proc, err := startSSHProcess(cmd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-proc.done:
+	case <-time.After(5 * time.Second):
+		proc.close()
+		t.Fatal("did not observe child exit")
+	}
+	if err := proc.close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSSHProcessFixture(t *testing.T) {
 	endpoint := os.Getenv("CCM_PROXY_CHILD_ENDPOINT")
 	switch os.Getenv("CCM_PROXY_CHILD_ROLE") {

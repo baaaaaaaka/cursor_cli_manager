@@ -1,11 +1,9 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os/exec"
 	"syscall"
-	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -14,27 +12,28 @@ func groupAttrs(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func observeExit(pid int) error {
-	err := waitForExitEvent(pid)
-	if !errors.Is(err, unix.EPERM) {
+func signalSSHGroup(pgid int, signal syscall.Signal) error {
+	err := syscall.Kill(-pgid, signal)
+	if err != unix.EPERM {
 		return err
 	}
-	// Some macOS environments reject the process filter. Look up the
-	// child's status without reaping it or releasing its process group ID.
-	const zombie = 5 // Darwin's SZOMB from sys/proc.h.
-	for {
-		entries, err := unix.SysctlKinfoProcSlice("kern.proc.pid", pid)
-		if err != nil {
-			return fmt.Errorf("read SSH child status: %w", err)
-		}
-		if len(entries) == 0 || entries[0].Proc.P_stat == zombie {
-			return nil
-		}
-		time.Sleep(100 * time.Millisecond)
+	// Darwin can report EPERM for a group that contains only zombies.
+	// Check the group before treating it as gone, since EPERM can also
+	// indicate a real permission failure for a live process.
+	entries, err := unix.SysctlKinfoProcSlice("kern.proc.pgrp", pgid)
+	if err != nil {
+		return fmt.Errorf("read SSH process group status: %w", err)
 	}
+	const zombie = 5 // Darwin's SZOMB from sys/proc.h.
+	for _, entry := range entries {
+		if entry.Proc.P_stat != zombie {
+			return unix.EPERM
+		}
+	}
+	return unix.ESRCH
 }
 
-func waitForExitEvent(pid int) error {
+func observeExit(pid int) error {
 	queue, err := unix.Kqueue()
 	if err != nil {
 		return err

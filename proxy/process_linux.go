@@ -11,6 +11,10 @@ func groupAttrs(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 }
 
+func signalSSHGroup(pgid int, signal syscall.Signal) error {
+	return syscall.Kill(-pgid, signal)
+}
+
 func observeExit(pid int) error {
 	for {
 		var info unix.Siginfo

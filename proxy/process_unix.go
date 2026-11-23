@@ -36,15 +36,15 @@ func startSSHProcess(cmd *exec.Cmd) (*process, error) {
 }
 
 func (p *process) close() error {
-	processGroup := -p.cmd.Process.Pid
-	if err := syscall.Kill(processGroup, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+	processGroup := p.cmd.Process.Pid
+	if err := signalSSHGroup(processGroup, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("send TERM to SSH process group: %w", err)
 	}
 	select {
 	case <-p.done:
 	case <-time.After(750 * time.Millisecond):
 	}
-	if err := syscall.Kill(processGroup, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := signalSSHGroup(processGroup, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("send KILL to SSH process group: %w", err)
 	}
 	select {
@@ -60,7 +60,7 @@ func (p *process) close() error {
 	p.cmd.Wait() // A signaled SSH process normally reports a nonzero exit status.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(processGroup, 0); errors.Is(err, syscall.ESRCH) {
+		if err := signalSSHGroup(processGroup, 0); errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
 		time.Sleep(25 * time.Millisecond)
