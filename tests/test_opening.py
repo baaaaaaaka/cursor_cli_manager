@@ -724,7 +724,13 @@ exit $LASTEXITCODE
 
             cmd = td_path / "cursor-agent.CMD"
             cmd.write_text(
-                "@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%~dp0cursor-agent.ps1\" %*\r\n",
+                "@echo off\r\n"
+                # Answer capability probes without timing the PowerShell launch.
+                "if \"%~2\"==\"--help\" (\r\n"
+                "  echo --approve-mcps --force\r\n"
+                "  exit /b 0\r\n"
+                ")\r\n"
+                "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"%~dp0cursor-agent.ps1\" %*\r\n",
                 encoding="utf-8",
             )
 

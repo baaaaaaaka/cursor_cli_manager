@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"syscall"
 	"time"
@@ -37,21 +38,21 @@ func startSSHProcess(cmd *exec.Cmd) (*process, error) {
 func (p *process) close() error {
 	processGroup := -p.cmd.Process.Pid
 	if err := syscall.Kill(processGroup, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
+		return fmt.Errorf("send TERM to SSH process group: %w", err)
 	}
 	select {
 	case <-p.done:
 	case <-time.After(750 * time.Millisecond):
 	}
 	if err := syscall.Kill(processGroup, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return err
+		return fmt.Errorf("send KILL to SSH process group: %w", err)
 	}
 	select {
 	case <-p.done:
 		if p.observeErr != nil {
 			// Still reap the process when the native observer could not run.
 			go p.cmd.Wait()
-			return p.observeErr
+			return fmt.Errorf("observe SSH child exit: %w", p.observeErr)
 		}
 	case <-time.After(2 * time.Second):
 		return errors.New("SSH process did not exit")
